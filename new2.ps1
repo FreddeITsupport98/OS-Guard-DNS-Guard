@@ -10,6 +10,7 @@
     - Automated Installation: Creates a Scheduled Task to re-apply locks automatically on boot/network change.
     - Background Service: Protects against Windows Updates and driver reinstalls.
     - Advanced Auditing: UI now tracks active GPO enforcement and Installation status.
+    - Payload Self-Defense: NTFS ACL hardening locks the installation directory against tampering.
 #>
 
 param (
@@ -351,14 +352,36 @@ function Disable-DNSLock {
 }
 
 # ============================================================================
-# 6. INSTALLER / PERSISTENCE MODULE (FIXED)
+# 6. INSTALLER / PERSISTENCE MODULE (HARDENED)
 # ============================================================================
 
 function Install-Persistence {
     Write-Log -Message "Installing DNS-Guard to System ($InstallDir)..." -Type "ACTION" -Color Yellow
     
-    # 1. Secure Copy to System Directory
+    # 1. Secure Copy & NTFS Hardening
     if (-not (Test-Path $InstallDir)) { New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null }
+    
+    # --- [NEW] NTFS PAYLOAD SELF-DEFENSE ---
+    Write-Log -Message "Hardening NTFS Permissions on installation directory..." -Type "INFO" -Color Yellow
+    try {
+        $DirAcl = Get-Acl -Path $InstallDir
+        
+        # Disable inheritance (so standard users don't inherit access from C:\ProgramData) and strip existing rules
+        $DirAcl.SetAccessRuleProtection($true, $false)
+        
+        # Explicitly grant Full Control ONLY to Administrators and SYSTEM
+        $RuleAdmin = New-Object System.Security.AccessControl.FileSystemAccessRule("BUILTIN\Administrators", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+        $RuleSystem = New-Object System.Security.AccessControl.FileSystemAccessRule("NT AUTHORITY\SYSTEM", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+        
+        $DirAcl.AddAccessRule($RuleAdmin)
+        $DirAcl.AddAccessRule($RuleSystem)
+        Set-Acl -Path $InstallDir -AclObject $DirAcl
+        Write-Log -Message "Installation directory locked to SYSTEM/Admins only." -Type "SUCCESS" -Color Green
+    } catch {
+        Write-Log -Message "Failed to harden NTFS permissions: $_" -Type "ERROR" -Color Red
+    }
+    # ----------------------------------------
+    
     Copy-Item -Path $PSCommandPath -Destination $InstallScript -Force
     
     # 2. Build the Global CLI Command (dnslock) in C:\Windows
@@ -373,7 +396,6 @@ function Install-Persistence {
     $Trigger1 = New-ScheduledTaskTrigger -AtStartup
     $Trigger2 = New-ScheduledTaskTrigger -AtLogOn
     
-    # [FIXED] Proper syntax to create a WMI/CIM Event Trigger in PowerShell
     $CimClass = Get-CimClass -ClassName MSFT_TaskEventTrigger -Namespace "Root/Microsoft/Windows/TaskScheduler"
     $Trigger3 = New-CimInstance -CimClass $CimClass -ClientOnly
     $Trigger3.Subscription = "<QueryList><Query Id='0' Path='Microsoft-Windows-NetworkProfile/Operational'><Select Path='Microsoft-Windows-NetworkProfile/Operational'>*[System[EventID=10000]]</Select></Query></QueryList>"
@@ -391,7 +413,7 @@ function Install-Persistence {
 function Uninstall-Persistence {
     Write-Log -Message "Uninstalling DNS-Guard from System..." -Type "ACTION" -Color Yellow
 
-    # [FIXED] Unlock the network FIRST (so it can safely write to the log file)
+    # Unlock the network FIRST (so it can safely write to the log file)
     Disable-DNSLock
 
     # Remove the Scheduled Task
@@ -409,10 +431,17 @@ function Uninstall-Persistence {
     # Delete System Directory LAST
     if (Test-Path $InstallDir) {
         Write-Log -Message "Installation directory removed. Goodbye!" -Type "INFO" -Color Gray
+        
+        # Revert NTFS lock to ensure clean deletion
+        try {
+            $Acl = Get-Acl -Path $InstallDir
+            $Acl.SetAccessRuleProtection($false, $true)
+            Set-Acl -Path $InstallDir -AclObject $Acl -ErrorAction SilentlyContinue
+        } catch {}
+        
         Remove-Item -Path $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 
-    # Use Write-Host here because the log file folder no longer exists
     Write-Host "`n[SUCCESS] UNINSTALLATION COMPLETE!" -ForegroundColor Green
 }
 
