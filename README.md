@@ -27,20 +27,21 @@ A robust, enterprise-grade PowerShell security tool designed to permanently lock
 
 ### Trade-Offs & Known Limitations
 
-While this script provides a high-security perimeter for your network configuration, deploying a "Zero Trust" registry lock introduces some friction into daily operations. Please be aware of the following scenarios before deployment:
+While this script provides a high-security perimeter for your network configuration, deploying a registry lock introduces some friction into daily operations. The impact depends on how your DNS was configured *before* you ran the lock:
 
-* **Captive Portals (Public Wi-Fi):**
-  Hotels, airports, and public networks use captive portals that require your device to temporarily use their local DNS to load the login/terms page. Because this script hard-locks your upstream DNS, captive portals will fail to route properly. 
-  * **Workaround:** Run the script, select `Option 2` (Unlock), connect to the network and log in, then run `Option 1` (Lock) to re-secure the connection.
+* **Captive Portals (If using Static DNS):**
+  If you hard-coded a custom DNS (like Control D) before locking, public Wi-Fi captive portals (hotels, airports) will fail to route to their login pages. 
+  * *Workaround:* Run the script, select `Option 2` (Unlock), connect to the network and log in, then run `Option 1` (Lock) to re-secure the connection. *(Note: If you use Automatic DHCP, captive portals will work perfectly normally).*
+
+* **Single Point of Failure (If using Static DNS):**
+  If you locked the adapter to a specific upstream DNS provider and their servers go down, you will lose web resolution. Because the GUI is locked, you cannot quickly switch back to an ISP's default DNS without running the script to unlock the system first.
 
 * **Corporate VPN Conflicts:**
-  Traditional work VPNs (e.g., Cisco AnyConnect, Fortinet) often rewrite your local adapter's DNS to resolve internal company domains (like `intranet.local`). The registry lock will block this injection, which may cause the VPN software to crash or fail to route internal traffic. *(Note: WFP-based apps like Proton VPN are unaffected but require manual DNS entry in the app's own settings).*
-
-* **Single Point of Failure:**
-  By removing Windows' ability to fall back to a local ISP's automatic DNS, an outage at your chosen upstream DNS provider will result in a total loss of web resolution. Furthermore, if you use aggressive privacy filters and a legitimate service breaks, there is no quick GUI bypass available.
+  Traditional work VPNs (e.g., Cisco AnyConnect, Fortinet) often try to rewrite your local adapter's DNS using elevated System privileges to resolve internal company domains. The registry lock will block this injection, which may cause the VPN software to crash or fail to route internal traffic. *(Note: WFP-based apps like Proton VPN are unaffected but require manual DNS entry in the app's own settings).*
 
 * **Administrative Friction:**
-  The Group Policy UI restrictions apply system-wide. If you need to perform standard network troubleshooting or change a static IP address months from now, you will encounter grayed-out menus and "Access Denied" registry errors. You must keep the script accessible to temporarily unlock the system (`Option 2`) before performing maintenance.
+  The Group Policy UI restrictions apply system-wide. If you need to perform standard network troubleshooting or change an IP address months from now, you will encounter grayed-out menus and "Access Denied" registry errors. You must keep the script accessible to temporarily unlock the system (`Option 2`) before performing maintenance.
+
 
 ---
 
