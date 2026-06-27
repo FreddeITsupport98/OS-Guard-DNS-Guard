@@ -119,6 +119,10 @@ function Get-DNSLockStatus {
     $AllLocked = $true
     $AnyLocked = $false
 
+    # Refresh adapter list each time (USB/Wi-Fi may change while menu is open)
+    $Adapters = Get-NetAdapter -IncludeHidden:$false -ErrorAction SilentlyContinue
+    if (-not $Adapters) { $Adapters = Get-NetAdapter -ErrorAction SilentlyContinue }
+
     Write-Host "`n=====================================================" -ForegroundColor DarkGray
     Write-Host " LIVE HARDWARE ADAPTER STATUS " -ForegroundColor White
     Write-Host "=====================================================" -ForegroundColor DarkGray
@@ -253,6 +257,19 @@ function Get-DNSLockStatus {
     }
     
     return $AllLocked
+}
+
+function Test-IntegrityStatus {
+    # Returns $true if installed and hash matches; $false if tampered; $null if not installed
+    $IntegrityRegPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WpnPlatform\Settings"
+    $IntegrityFile = Join-Path $InstallDir "integrity.sha256"
+    if (-not (Test-Path $InstallScript)) { return $null }
+    $ExpectedHash = $null
+    try { $ExpectedHash = (Get-ItemProperty -Path $IntegrityRegPath -Name "PushConfigBackoffInterval" -ErrorAction Stop).PushConfigBackoffInterval } catch {}
+    if (-not $ExpectedHash -and (Test-Path $IntegrityFile)) { $ExpectedHash = Get-Content -Path $IntegrityFile -Raw }
+    if (-not $ExpectedHash) { return $null }
+    $ActualHash = (Get-FileHash -Path $InstallScript -Algorithm SHA256).Hash
+    return ($ExpectedHash.Trim() -eq $ActualHash.Trim())
 }
 
 # ============================================================================
@@ -497,6 +514,18 @@ function Install-Persistence {
     Register-ScheduledTask -TaskName $Guardian2Name -Action $Guardian2Action -Trigger $Guardian2Trigger -Principal $Guardian2Principal -Force | Out-Null
     Write-Log -Message "Guardian 2 '$Guardian2Name' registered (10-minute heartbeat)." -Type "INFO" -Color Gray
 
+    # 4.2 WMI Event Subscription: Third hidden persistence layer (harder to find than tasks)
+    Write-Log -Message "Registering WMI event subscription for persistence..." -Type "INFO" -Color Gray
+    try {
+        $WmiQuery = "SELECT * FROM __InstanceModificationEvent WITHIN 600 WHERE TargetInstance ISA 'Win32_Service' AND TargetInstance.Name = 'Schedule'"
+        $WmiConsumer = Set-WmiInstance -Class CommandLineEventConsumer -Namespace "root\subscription" -Arguments @{Name="WindowsUpdateHealthCheck"; CommandLineTemplate="powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$InstallScript`" -SilentLock"; RunInteractively=$false} -ErrorAction Stop
+        $WmiFilter = Set-WmiInstance -Class __EventFilter -Namespace "root\subscription" -Arguments @{Name="WindowsUpdateHealthCheck"; EventNamespace="root\cimv2"; QueryLanguage="WQL"; Query=$WmiQuery} -ErrorAction Stop
+        Set-WmiInstance -Class __FilterToConsumerBinding -Namespace "root\subscription" -Arguments @{Filter=$WmiFilter; Consumer=$WmiConsumer} -ErrorAction Stop | Out-Null
+        Write-Log -Message "WMI subscription registered (triggers if Schedule service is modified)." -Type "SUCCESS" -Color Green
+    } catch {
+        Write-Log -Message "WMI subscription registration failed: $_" -Type "WARN" -Color Yellow
+    }
+
     # 5. Self-Integrity: Store SHA256 hash in a misleading registry key (harder to tamper than a file)
     $IntegrityRegPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WpnPlatform\Settings"
     if (-not (Test-Path $IntegrityRegPath)) { New-Item -Path $IntegrityRegPath -Force | Out-Null }
@@ -544,6 +573,14 @@ function Uninstall-Persistence {
         Unregister-ScheduledTask -TaskName $Guardian2Name -Confirm:$false | Out-Null
         Write-Log -Message "Removed Guardian 2: $Guardian2Name" -Type "INFO" -Color Gray
     }
+
+    # Remove WMI Event Subscription
+    Write-Log -Message "Removing WMI event subscription..." -Type "INFO" -Color Gray
+    try {
+        Get-WmiObject -Class __EventFilter -Namespace "root\subscription" -Filter "Name='WindowsUpdateHealthCheck'" -ErrorAction SilentlyContinue | Remove-WmiObject -ErrorAction SilentlyContinue
+        Get-WmiObject -Class CommandLineEventConsumer -Namespace "root\subscription" -Filter "Name='WindowsUpdateHealthCheck'" -ErrorAction SilentlyContinue | Remove-WmiObject -ErrorAction SilentlyContinue
+        Get-WmiObject -Class __FilterToConsumerBinding -Namespace "root\subscription" -Filter "__PATH LIKE '%WindowsUpdateHealthCheck%'" -ErrorAction SilentlyContinue | Remove-WmiObject -ErrorAction SilentlyContinue
+    } catch { Write-Log -Message "Failed to remove WMI subscription: $_" -Type "WARN" -Color Yellow }
     
     # Remove the integrity hash registry key
     $IntegrityRegPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WpnPlatform\Settings"
@@ -677,12 +714,32 @@ do {
     Write-Host "-----------------------------------------------------"
 
     $Choice = Read-Host "Select an administrative action (1-6)"
+    $IntegrityStatus = Test-IntegrityStatus
 
     switch ($Choice) {
-        "1" { Enable-DNSLock; Write-Host "`n[ PRESS ANY KEY TO RETURN TO MENU ]" -ForegroundColor DarkGray; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") }
-        "2" { Disable-DNSLock; Write-Host "`n[ PRESS ANY KEY TO RETURN TO MENU ]" -ForegroundColor DarkGray; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") }
+        "1" {
+            if ($IntegrityStatus -eq $false) {
+                Write-Host "`n[BLOCKED] Option [1] is disabled because the script has been tampered with." -ForegroundColor Red -BackgroundColor Black
+                Write-Host "Use option [4] to uninstall, then reinstall from a clean source." -ForegroundColor Yellow
+            } else {
+                Enable-DNSLock
+            }
+            Write-Host "`n[ PRESS ANY KEY TO RETURN TO MENU ]" -ForegroundColor DarkGray; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        }
+        "2" {
+            if ($IntegrityStatus -eq $false) {
+                Write-Host "`n[BLOCKED] Option [2] is disabled because the script has been tampered with." -ForegroundColor Red -BackgroundColor Black
+                Write-Host "Use option [4] to uninstall, then reinstall from a clean source." -ForegroundColor Yellow
+            } else {
+                Disable-DNSLock
+            }
+            Write-Host "`n[ PRESS ANY KEY TO RETURN TO MENU ]" -ForegroundColor DarkGray; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        }
         "3" {
-            if (Test-Path $InstallDir) {
+            if ($IntegrityStatus -eq $false) {
+                Write-Host "`n[BLOCKED] Option [3] is disabled because the script has been tampered with." -ForegroundColor Red -BackgroundColor Black
+                Write-Host "Use option [4] to uninstall, then reinstall from a clean source." -ForegroundColor Yellow
+            } elseif (Test-Path $InstallDir) {
                 Write-Warning "DNS-Guard is already installed. Option [3] is unavailable."
             } else {
                 Install-Persistence
