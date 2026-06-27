@@ -351,7 +351,7 @@ function Disable-DNSLock {
 }
 
 # ============================================================================
-# 6. INSTALLER / PERSISTENCE MODULE (NEW)
+# 6. INSTALLER / PERSISTENCE MODULE (FIXED)
 # ============================================================================
 
 function Install-Persistence {
@@ -373,8 +373,9 @@ function Install-Persistence {
     $Trigger1 = New-ScheduledTaskTrigger -AtStartup
     $Trigger2 = New-ScheduledTaskTrigger -AtLogOn
     
-    # Event-Driven Trigger (Network Connect/Driver Update)
-    $Trigger3 = CimInstance -ClassName MSFT_TaskEventTrigger -Namespace Root/Microsoft/Windows/TaskScheduler -ClientOnly
+    # [FIXED] Proper syntax to create a WMI/CIM Event Trigger in PowerShell
+    $CimClass = Get-CimClass -ClassName MSFT_TaskEventTrigger -Namespace "Root/Microsoft/Windows/TaskScheduler"
+    $Trigger3 = New-CimInstance -CimClass $CimClass -ClientOnly
     $Trigger3.Subscription = "<QueryList><Query Id='0' Path='Microsoft-Windows-NetworkProfile/Operational'><Select Path='Microsoft-Windows-NetworkProfile/Operational'>*[System[EventID=10000]]</Select></Query></QueryList>"
     $Trigger3.Enabled = $True
 
@@ -390,6 +391,9 @@ function Install-Persistence {
 function Uninstall-Persistence {
     Write-Log -Message "Uninstalling DNS-Guard from System..." -Type "ACTION" -Color Yellow
 
+    # [FIXED] Unlock the network FIRST (so it can safely write to the log file)
+    Disable-DNSLock
+
     # Remove the Scheduled Task
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false | Out-Null
@@ -402,16 +406,14 @@ function Uninstall-Persistence {
         Write-Log -Message "Removed 'dnslock' CLI Alias." -Type "INFO" -Color Gray
     }
     
-    # Delete System Directory
+    # Delete System Directory LAST
     if (Test-Path $InstallDir) {
+        Write-Log -Message "Installation directory removed. Goodbye!" -Type "INFO" -Color Gray
         Remove-Item -Path $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
-        Write-Log -Message "Installation directory removed." -Type "INFO" -Color Gray
     }
 
-    # Unlock the network
-    Disable-DNSLock
-
-    Write-Log -Message "UNINSTALLATION COMPLETE!" -Type "SUCCESS" -Color Green
+    # Use Write-Host here because the log file folder no longer exists
+    Write-Host "`n[SUCCESS] UNINSTALLATION COMPLETE!" -ForegroundColor Green
 }
 
 # ============================================================================
