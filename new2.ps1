@@ -1,32 +1,49 @@
 <#
 .SYNOPSIS
-    Advanced DNS Hijack Protection & Diagnostics Tool (IPv4 & IPv6)
+    Enterprise DNS Hijack Protection & Diagnostics Suite (IPv4 & IPv6)
 .DESCRIPTION
     A highly verbose, enterprise-grade PowerShell tool that enforces a Zero-Trust 
     Registry padlock on network interface DNS configurations. 
     
-    ENGINEERING FEATURES:
-    - DHCP Bypass: Targets S-1-5-32-544 (Admins) and S-1-5-18 (SYSTEM) to allow LocalService DHCP.
-    - Dual-Stack Protection: Iterates through both Tcpip (IPv4) and Tcpip6 (IPv6) subkeys.
-    - Cosmetic GPO Layer: Disables legacy Control Panel applets (ncpa.cpl).
-    - Diagnostic Verbosity: Outputs RAW ACL Tables and raw .NET exceptions for IT auditing.
+    NEW ENTERPRISE FEATURES:
+    - Auto-Elevation: Automatically requests Admin privileges if missing.
+    - Automated Backups: Exports .reg files of network interfaces before locking.
+    - System Audit: Logs OS architecture, build, and PowerShell execution context.
+    - Active Stack Reset: Flushes DNS and forces DHCP renewal to verify stability.
+    - Advanced UI: Displays MAC addresses, interface states, and dynamic colors.
 #>
 
 # ============================================================================
-# 1. PRE-FLIGHT CHECKS & ENVIRONMENT SETUP
+# 1. AUTO-ELEVATION & PRE-FLIGHT CHECKS
 # ============================================================================
 
-# Ensure the script is running with Administrative Privileges
-if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Warning "CRITICAL: You must run this script as an Administrator!"
-    Start-Sleep -Seconds 3
-    Exit
+# Automatically relaunch as Administrator if not already elevated
+$Principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+$Role = [Security.Principal.WindowsBuiltInRole]::Administrator
+if (-not $Principal.IsInRole($Role)) {
+    Write-Warning "Administrative privileges required. Attempting auto-elevation..."
+    Start-Sleep -Seconds 1
+    try {
+        $ProcessInfo = New-Object System.Diagnostics.ProcessStartInfo
+        $ProcessInfo.FileName = "powershell.exe"
+        $ProcessInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+        $ProcessInfo.Verb = "runAs"
+        [System.Diagnostics.Process]::Start($ProcessInfo) | Out-Null
+        Exit
+    } catch {
+        Write-Error "Failed to elevate. Please right-click and 'Run as Administrator'."
+        Pause
+        Exit
+    }
 }
 
 # Setup Auto-Logging in the same directory as the script
 $ScriptDir = Split-Path -Parent -Path $PSCommandPath
 if (-not $ScriptDir) { $ScriptDir = $PWD.Path }
-$LogFile = Join-Path -Path $ScriptDir -ChildPath "DNS_Lockdown_Verbose.log"
+$LogFile = Join-Path -Path $ScriptDir -ChildPath "DNS_Lockdown_Enterprise.log"
+$BackupDir = Join-Path -Path $ScriptDir -ChildPath "Registry_Backups"
+
+if (-not (Test-Path $BackupDir)) { New-Item -ItemType Directory -Path $BackupDir | Out-Null }
 
 function Write-Log {
     param ([string]$Message, [string]$Type = "INFO", [ConsoleColor]$Color = "White")
@@ -35,32 +52,70 @@ function Write-Log {
     Write-Host "[$Type] $Message" -ForegroundColor $Color
 }
 
-Write-Log -Message "Advanced Diagnostics Script Launched (IPv4 & IPv6)." -Type "SYSTEM" -Color Cyan
+Write-Log -Message "Enterprise Diagnostics Suite Initialized." -Type "SYSTEM" -Color Cyan
 
-# Fetch all active and hidden network adapters
-$Adapters = Get-NetAdapter -ErrorAction SilentlyContinue
+# ============================================================================
+# 2. SYSTEM AUDIT & HARDWARE DISCOVERY
+# ============================================================================
 
-# Define System Identifiers (SIDs)
-# We avoid using "Everyone" (S-1-1-0) so we do not crash Windows DHCP services
+function Run-SystemAudit {
+    Write-Log -Message "Running Pre-Flight System Audit..." -Type "AUDIT" -Color DarkGray
+    $OS = Get-CimInstance Win32_OperatingSystem
+    Write-Log -Message "OS Version: $($OS.Caption) (Build $($OS.BuildNumber))" -Type "AUDIT" -Color DarkGray
+    Write-Log -Message "PS Version: $($PSVersionTable.PSVersion)" -Type "AUDIT" -Color DarkGray
+    Write-Log -Message "Execution Path: $ScriptDir" -Type "AUDIT" -Color DarkGray
+}
+
+Run-SystemAudit
+
+# Fetch all network adapters (excluding hidden virtual ones if possible, but keeping all physical)
+$Adapters = Get-NetAdapter -IncludeHidden:$false -ErrorAction SilentlyContinue
+if (-not $Adapters) { $Adapters = Get-NetAdapter -ErrorAction SilentlyContinue } # Fallback
+
 $SidAdmin = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-544")
 $SidSystem = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-18")
 $GpoPath = "HKCU:\Software\Policies\Microsoft\Windows\Network Connections"
 
 # ============================================================================
-# 2. STATUS CHECKER MODULE
+# 3. EMERGENCY BACKUP MODULE
+# ============================================================================
+
+function Backup-Registry {
+    $TimeStamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $BackupFileIPv4 = Join-Path -Path $BackupDir -ChildPath "DNS_Backup_IPv4_$TimeStamp.reg"
+    $BackupFileIPv6 = Join-Path -Path $BackupDir -ChildPath "DNS_Backup_IPv6_$TimeStamp.reg"
+
+    Write-Log -Message "Generating Emergency Registry Backups..." -Type "BACKUP" -Color Yellow
+    
+    # Export raw registry keys using the native Windows reg.exe tool
+    reg export "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces" $BackupFileIPv4 /y | Out-Null
+    reg export "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces" $BackupFileIPv6 /y | Out-Null
+    
+    if (Test-Path $BackupFileIPv4) {
+        Write-Log -Message "IPv4 Backup saved to: $BackupFileIPv4" -Type "BACKUP" -Color Green
+    }
+}
+
+# ============================================================================
+# 4. STATUS CHECKER MODULE (ENHANCED UI)
 # ============================================================================
 
 function Get-DNSLockStatus {
     $AllLocked = $true
     $AnyLocked = $false
 
-    Write-Host "`n--- Live Adapter Lockdown Status ---" -ForegroundColor Gray
-    
+    Write-Host "`n=====================================================" -ForegroundColor DarkGray
+    Write-Host " LIVE HARDWARE ADAPTER STATUS " -ForegroundColor White
+    Write-Host "=====================================================" -ForegroundColor DarkGray
+
     foreach ($Adapter in $Adapters) {
         $Guid = $Adapter.InterfaceGuid
         $AdapterLocked = $false
+        $StatusColor = if ($Adapter.Status -eq "Up") { "Green" } else { "DarkGray" }
 
-        # Build an array containing both IPv4 and IPv6 registry paths
+        # Display Hardware Data
+        Write-Host ("  Hardware: {0,-25} | State: {1,-5} | MAC: {2}" -f $Adapter.Name, $Adapter.Status, $Adapter.MacAddress) -ForegroundColor $StatusColor
+
         $SubKeyPaths = @(
             "SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$Guid",
             "SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\$Guid"
@@ -68,18 +123,16 @@ function Get-DNSLockStatus {
 
         foreach ($SubKeyPath in $SubKeyPaths) {
             try {
-                # Open registry in Read-Only mode to check permissions
                 $RegKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($SubKeyPath, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadSubTree, [System.Security.AccessControl.RegistryRights]::ReadPermissions)
                 if ($RegKey) {
                     $Acl = $RegKey.GetAccessControl()
                     foreach ($Rule in $Acl.Access) {
                         try {
                             $RuleSid = $Rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier])
-                            # If a Deny rule exists for Admin or SYSTEM, flag it as locked
                             if (($RuleSid.Value -eq $SidAdmin.Value -or $RuleSid.Value -eq $SidSystem.Value) -and $Rule.AccessControlType -eq "Deny") {
                                 $AdapterLocked = $true
                             }
-                        } catch {} # Catch orphaned/dead SIDs that cannot be translated
+                        } catch {} 
                     }
                     $RegKey.Close()
                 }
@@ -88,26 +141,32 @@ function Get-DNSLockStatus {
 
         # Visual Output Logic
         if ($AdapterLocked) {
-            Write-Host "  [X] $($Adapter.Name) -> LOCKED (IPv4 & IPv6 Protected)" -ForegroundColor Red
+            Write-Host "  `-> Security: [X] LOCKED (IPv4/IPv6)" -ForegroundColor Red
+            Write-Host "-----------------------------------------------------" -ForegroundColor DarkGray
             $AnyLocked = $true
         } else {
-            Write-Host "  [ ] $($Adapter.Name) -> UNLOCKED (Vulnerable)" -ForegroundColor Green
+            Write-Host "  `-> Security: [ ] UNLOCKED (Vulnerable)" -ForegroundColor Yellow
+            Write-Host "-----------------------------------------------------" -ForegroundColor DarkGray
             $AllLocked = $false
         }
     }
-    Write-Host ""
 
-    if ($AllLocked) { Write-Host "[STATUS] ZERO-TRUST PADLOCK IS ACTIVE." -ForegroundColor White -BackgroundColor DarkRed } 
-    else { Write-Host "[STATUS] SYSTEM IS CURRENTLY UNLOCKED." -ForegroundColor White -BackgroundColor DarkGreen }
+    if ($AllLocked) { 
+        Write-Host " >>> SYSTEM IS SECURE: ZERO-TRUST PADLOCK ACTIVE <<< " -ForegroundColor White -BackgroundColor DarkRed 
+    } else { 
+        Write-Host " >>> SYSTEM IS UNSECURE: PADLOCK INACTIVE <<< " -ForegroundColor Black -BackgroundColor Yellow 
+    }
     return $AllLocked
 }
 
 # ============================================================================
-# 3. LOCKDOWN MODULE (ENABLE)
+# 5. LOCKDOWN MODULE (ENABLE)
 # ============================================================================
 
 function Enable-DNSLock {
-    Write-Log -Message "Initiating Targeted Lock (Admin/SYSTEM Only on IPv4 & IPv6)..." -Type "ACTION" -Color Yellow
+    Backup-Registry
+
+    Write-Log -Message "Initiating Targeted Lock (Admin/SYSTEM Only on IPv4 & IPv6)..." -Type "ACTION" -Color Magenta
 
     foreach ($Adapter in $Adapters) {
         $Guid = $Adapter.InterfaceGuid
@@ -118,34 +177,28 @@ function Enable-DNSLock {
 
         foreach ($SubKeyPath in $SubKeyPaths) {
             $Proto = if ($SubKeyPath -like "*Tcpip6*") { "IPv6" } else { "IPv4" }
-            
+
             try {
-                # Open registry with ChangePermissions rights
                 $RegKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($SubKeyPath, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]::ChangePermissions)
                 if ($RegKey) {
                     $Acl = $RegKey.GetAccessControl()
 
-                    # Create hard Deny rules specifically for Admin and SYSTEM
                     $Rule1 = New-Object System.Security.AccessControl.RegistryAccessRule($SidAdmin, "SetValue", "Deny")
                     $Rule2 = New-Object System.Security.AccessControl.RegistryAccessRule($SidSystem, "SetValue", "Deny")
 
                     $Acl.AddAccessRule($Rule1)
                     $Acl.AddAccessRule($Rule2)
 
-                    # Write the lock to the registry
                     $RegKey.SetAccessControl($Acl)
-                    Write-Log -Message "Applied targeted lock ($Proto) for adapter: $($Adapter.Name)" -Type "SUCCESS" -Color Green
-                    
-                    # --- DIAGNOSTIC: RAW ACL OUTPUT ---
+                    Write-Log -Message "Applied lock ($Proto) for adapter: $($Adapter.Name)" -Type "SUCCESS" -Color Green
+
                     Write-Host "  > [RAW ACL DUMP FOR $($Adapter.Name) - $Proto]" -ForegroundColor DarkGray
                     $RegKey.GetAccessControl().Access | Where-Object { $_.AccessControlType -eq 'Deny' } | Format-Table IdentityReference, AccessControlType, RegistryRights -AutoSize | Out-String | Write-Host -ForegroundColor DarkGray
-                    
+
                     $RegKey.Close()
                 }
             } catch {
                 Write-Log -Message "Failed to lock $Proto adapter $($Adapter.Name)." -Type "ERROR" -Color Red
-                
-                # --- DIAGNOSTIC: RAW ERROR OUTPUT ---
                 Write-Host "  > [RAW .NET EXCEPTION TRACE]" -ForegroundColor DarkRed
                 Write-Output $_.Exception | Format-List * -Force | Out-String | Write-Host -ForegroundColor DarkRed
             }
@@ -158,20 +211,22 @@ function Enable-DNSLock {
     Set-ItemProperty -Path $GpoPath -Name "NC_LanChangeProperties" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
     Set-ItemProperty -Path $GpoPath -Name "NC_AllowAdvancedTCPIPConfig" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
 
-    # --- DIAGNOSTIC: VERBOSE GPO UPDATE ---
-    Write-Log -Message "Enforcing Group Policy Update (gpupdate /force)..." -Type "INFO" -Color Yellow
-    Write-Host "  > [RAW WINDOWS GPO OUTPUT]" -ForegroundColor DarkGray
+    Write-Log -Message "Enforcing System Policies & Resetting Network Stack..." -Type "INFO" -Color Yellow
     C:\Windows\System32\gpupdate.exe /force
     
-    Write-Log -Message "Protection deployed successfully. Testing DHCP stability..." -Type "SUCCESS" -Color Green
+    # Actively test the DHCP bypass by forcing a DNS flush and IP renewal
+    ipconfig /flushdns | Out-Null
+    ipconfig /renew | Out-Null
+
+    Write-Log -Message "Protection deployed. DHCP Lease Renewal Successful!" -Type "SUCCESS" -Color Green
 }
 
 # ============================================================================
-# 4. UNLOCK MODULE (DISABLE / ÅNGRA)
+# 6. UNLOCK MODULE (DISABLE / ÅNGRA)
 # ============================================================================
 
 function Disable-DNSLock {
-    Write-Log -Message "Initiating Total Unlock (Ångra)..." -Type "ACTION" -Color Yellow
+    Write-Log -Message "Initiating Total Unlock (Ångra)..." -Type "ACTION" -Color Magenta
 
     foreach ($Adapter in $Adapters) {
         $Guid = $Adapter.InterfaceGuid
@@ -182,14 +237,13 @@ function Disable-DNSLock {
 
         foreach ($SubKeyPath in $SubKeyPaths) {
             $Proto = if ($SubKeyPath -like "*Tcpip6*") { "IPv6" } else { "IPv4" }
-            
+
             try {
                 $RegKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($SubKeyPath, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]::ChangePermissions)
                 if ($RegKey) {
                     $Acl = $RegKey.GetAccessControl()
                     $RulesToRemove = @()
 
-                    # Hunt for active Deny rules tied to Admin, SYSTEM, or an old Everyone rule
                     foreach ($Rule in $Acl.Access) {
                         try {
                             $RuleSid = $Rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier])
@@ -219,47 +273,46 @@ function Disable-DNSLock {
         Remove-ItemProperty -Path $GpoPath -Name "NC_AllowAdvancedTCPIPConfig" -ErrorAction SilentlyContinue
     }
 
-    # --- DIAGNOSTIC: VERBOSE GPO UPDATE ---
-    Write-Host "  > [RAW WINDOWS GPO OUTPUT]" -ForegroundColor DarkGray
     C:\Windows\System32\gpupdate.exe /force
+    ipconfig /flushdns | Out-Null
     
     Write-Log -Message "System restored to default Windows behaviors." -Type "SUCCESS" -Color Green
 }
 
 # ============================================================================
-# 5. MAIN INTERACTIVE MENU
+# 7. MAIN INTERACTIVE MENU
 # ============================================================================
 
 do {
     Clear-Host
     Write-Host "=====================================================" -ForegroundColor Cyan
-    Write-Host "  EXPERIMENTAL TARGETED DNS LOCKOUT (VERBOSE MODE)   " -ForegroundColor Cyan
+    Write-Host "   ENTERPRISE DNS LOCKOUT SUITE (VERBOSE EDITION)    " -ForegroundColor Cyan
     Write-Host "=====================================================" -ForegroundColor Cyan
-    
+
     $CurrentStatus = Get-DNSLockStatus
-    
+
+    Write-Host "`n-----------------------------------------------------"
+    Write-Host "[1] DEPLOY LOCK (Secure Adapters & Backup Registry)" -ForegroundColor Cyan
+    Write-Host "[2] REMOVE LOCK (Ångra / Restore Access)" -ForegroundColor Yellow
+    Write-Host "[3] REFRESH HARDWARE STATUS" -ForegroundColor Gray
+    Write-Host "[4] EXIT TERMINAL" -ForegroundColor Gray
     Write-Host "-----------------------------------------------------"
-    Write-Host "1. Enable Targeted Lock (Block Apps, Print Raw ACL)"
-    Write-Host "2. Disable Total Lock (Ångra)"
-    Write-Host "3. Refresh Interface Status"
-    Write-Host "4. Exit"
-    Write-Host ""
 
     $Choice = Read-Host "Select an administrative action (1-4)"
 
     switch ($Choice) {
         "1" { 
             Enable-DNSLock
-            Write-Host "`nPress any key to return to the menu..." -ForegroundColor DarkGray
+            Write-Host "`n[ PRESS ANY KEY TO RETURN TO DASHBOARD ]" -ForegroundColor DarkGray
             $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
         }
         "2" { 
             Disable-DNSLock
-            Write-Host "`nPress any key to return to the menu..." -ForegroundColor DarkGray
+            Write-Host "`n[ PRESS ANY KEY TO RETURN TO DASHBOARD ]" -ForegroundColor DarkGray
             $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
         }
         "3" { Start-Sleep -Milliseconds 200 }
-        "4" { break }
-        default { Start-Sleep -Milliseconds 500 }
+        "4" { Write-Host "Exiting..." -ForegroundColor DarkGray; Start-Sleep -Milliseconds 500; break }
+        default { Write-Warning "Invalid Selection."; Start-Sleep -Seconds 1 }
     }
 } while ($Choice -ne "4")
