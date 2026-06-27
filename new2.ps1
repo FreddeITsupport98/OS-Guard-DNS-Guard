@@ -1,15 +1,16 @@
 <#
 .SYNOPSIS
-    Enterprise DNS Hijack Protection & Diagnostics Suite (IPv4 & IPv6)
+    Enterprise DNS Hijack Protection & Diagnostics Suite (IPv4 & IPv6 + DoH)
 .DESCRIPTION
     A highly verbose, enterprise-grade PowerShell tool that enforces a Zero-Trust 
-    Registry padlock on network interface DNS configurations. 
+    Registry padlock on network interface DNS configurations and closes browser DoH loopholes.
     
     FEATURES:
     - Auto-Elevation: Automatically requests Admin privileges if missing.
     - System Audit: Logs OS architecture, build, and PowerShell execution context.
     - Active Stack Reset: Flushes DNS and forces DHCP renewal to verify stability.
     - Advanced UI: Displays MAC addresses, interface states, and dynamic colors.
+    - DoH Prevention: Enforces system DNS on Edge, Chrome, and Firefox.
 #>
 
 # ============================================================================
@@ -71,6 +72,11 @@ if (-not $Adapters) { $Adapters = Get-NetAdapter -ErrorAction SilentlyContinue }
 $SidAdmin = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-544")
 $SidSystem = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-18")
 $GpoPath = "HKCU:\Software\Policies\Microsoft\Windows\Network Connections"
+
+# Define Browser DoH GPO Paths
+$EdgePath = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"
+$ChromePath = "HKLM:\SOFTWARE\Policies\Google\Chrome"
+$FirefoxPath = "HKLM:\SOFTWARE\Policies\Mozilla\Firefox\DNSOverHTTPS"
 
 # ============================================================================
 # 3. STATUS CHECKER MODULE (ENHANCED UI)
@@ -185,9 +191,21 @@ function Enable-DNSLock {
     Set-ItemProperty -Path $GpoPath -Name "NC_LanChangeProperties" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
     Set-ItemProperty -Path $GpoPath -Name "NC_AllowAdvancedTCPIPConfig" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
 
+    Write-Log -Message "Enforcing Browser DoH Restrictions (Edge, Chrome, Firefox)..." -Type "INFO" -Color Yellow
+    # Edge
+    if (!(Test-Path $EdgePath)) { New-Item -Path $EdgePath -Force | Out-Null }
+    Set-ItemProperty -Path $EdgePath -Name "DnsOverHttpsMode" -Value "off" -Type String -Force
+    Set-ItemProperty -Path $EdgePath -Name "BuiltInDnsClientEnabled" -Value 0 -Type DWord -Force
+    # Chrome
+    if (!(Test-Path $ChromePath)) { New-Item -Path $ChromePath -Force | Out-Null }
+    Set-ItemProperty -Path $ChromePath -Name "DnsOverHttpsMode" -Value "off" -Type String -Force
+    # Firefox
+    if (!(Test-Path $FirefoxPath)) { New-Item -Path $FirefoxPath -Force | Out-Null }
+    Set-ItemProperty -Path $FirefoxPath -Name "Enabled" -Value 0 -Type DWord -Force
+
     Write-Log -Message "Enforcing System Policies & Resetting Network Stack..." -Type "INFO" -Color Yellow
     C:\Windows\System32\gpupdate.exe /force
-    
+
     # Actively test the DHCP bypass by forcing a DNS flush and IP renewal
     ipconfig /flushdns | Out-Null
     ipconfig /renew | Out-Null
@@ -247,9 +265,21 @@ function Disable-DNSLock {
         Remove-ItemProperty -Path $GpoPath -Name "NC_AllowAdvancedTCPIPConfig" -ErrorAction SilentlyContinue
     }
 
+    Write-Log -Message "Removing Browser DoH Restrictions (Edge, Chrome, Firefox)..." -Type "INFO" -Color Yellow
+    if (Test-Path $EdgePath) {
+        Remove-ItemProperty -Path $EdgePath -Name "DnsOverHttpsMode" -ErrorAction SilentlyContinue
+        Remove-ItemProperty -Path $EdgePath -Name "BuiltInDnsClientEnabled" -ErrorAction SilentlyContinue
+    }
+    if (Test-Path $ChromePath) {
+        Remove-ItemProperty -Path $ChromePath -Name "DnsOverHttpsMode" -ErrorAction SilentlyContinue
+    }
+    if (Test-Path $FirefoxPath) {
+        Remove-ItemProperty -Path $FirefoxPath -Name "Enabled" -ErrorAction SilentlyContinue
+    }
+
     C:\Windows\System32\gpupdate.exe /force
     ipconfig /flushdns | Out-Null
-    
+
     Write-Log -Message "System restored to default Windows behaviors." -Type "SUCCESS" -Color Green
 }
 
