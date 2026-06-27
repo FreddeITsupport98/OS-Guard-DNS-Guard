@@ -5,9 +5,8 @@
     A highly verbose, enterprise-grade PowerShell tool that enforces a Zero-Trust 
     Registry padlock on network interface DNS configurations. 
     
-    NEW ENTERPRISE FEATURES:
+    FEATURES:
     - Auto-Elevation: Automatically requests Admin privileges if missing.
-    - Automated Backups: Exports .reg files of network interfaces before locking.
     - System Audit: Logs OS architecture, build, and PowerShell execution context.
     - Active Stack Reset: Flushes DNS and forces DHCP renewal to verify stability.
     - Advanced UI: Displays MAC addresses, interface states, and dynamic colors.
@@ -41,9 +40,6 @@ if (-not $Principal.IsInRole($Role)) {
 $ScriptDir = Split-Path -Parent -Path $PSCommandPath
 if (-not $ScriptDir) { $ScriptDir = $PWD.Path }
 $LogFile = Join-Path -Path $ScriptDir -ChildPath "DNS_Lockdown_Enterprise.log"
-$BackupDir = Join-Path -Path $ScriptDir -ChildPath "Registry_Backups"
-
-if (-not (Test-Path $BackupDir)) { New-Item -ItemType Directory -Path $BackupDir | Out-Null }
 
 function Write-Log {
     param ([string]$Message, [string]$Type = "INFO", [ConsoleColor]$Color = "White")
@@ -77,27 +73,7 @@ $SidSystem = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-18")
 $GpoPath = "HKCU:\Software\Policies\Microsoft\Windows\Network Connections"
 
 # ============================================================================
-# 3. EMERGENCY BACKUP MODULE
-# ============================================================================
-
-function Backup-Registry {
-    $TimeStamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $BackupFileIPv4 = Join-Path -Path $BackupDir -ChildPath "DNS_Backup_IPv4_$TimeStamp.reg"
-    $BackupFileIPv6 = Join-Path -Path $BackupDir -ChildPath "DNS_Backup_IPv6_$TimeStamp.reg"
-
-    Write-Log -Message "Generating Emergency Registry Backups..." -Type "BACKUP" -Color Yellow
-    
-    # Export raw registry keys using the native Windows reg.exe tool
-    reg export "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces" $BackupFileIPv4 /y | Out-Null
-    reg export "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces" $BackupFileIPv6 /y | Out-Null
-    
-    if (Test-Path $BackupFileIPv4) {
-        Write-Log -Message "IPv4 Backup saved to: $BackupFileIPv4" -Type "BACKUP" -Color Green
-    }
-}
-
-# ============================================================================
-# 4. STATUS CHECKER MODULE (ENHANCED UI)
+# 3. STATUS CHECKER MODULE (ENHANCED UI)
 # ============================================================================
 
 function Get-DNSLockStatus {
@@ -160,12 +136,10 @@ function Get-DNSLockStatus {
 }
 
 # ============================================================================
-# 5. LOCKDOWN MODULE (ENABLE)
+# 4. LOCKDOWN MODULE (ENABLE)
 # ============================================================================
 
 function Enable-DNSLock {
-    Backup-Registry
-
     Write-Log -Message "Initiating Targeted Lock (Admin/SYSTEM Only on IPv4 & IPv6)..." -Type "ACTION" -Color Magenta
 
     foreach ($Adapter in $Adapters) {
@@ -222,7 +196,7 @@ function Enable-DNSLock {
 }
 
 # ============================================================================
-# 6. UNLOCK MODULE (DISABLE / ÅNGRA)
+# 5. UNLOCK MODULE (DISABLE / ÅNGRA)
 # ============================================================================
 
 function Disable-DNSLock {
@@ -280,7 +254,7 @@ function Disable-DNSLock {
 }
 
 # ============================================================================
-# 7. MAIN INTERACTIVE MENU
+# 6. MAIN INTERACTIVE MENU
 # ============================================================================
 
 do {
@@ -292,7 +266,7 @@ do {
     $CurrentStatus = Get-DNSLockStatus
 
     Write-Host "`n-----------------------------------------------------"
-    Write-Host "[1] DEPLOY LOCK (Secure Adapters & Backup Registry)" -ForegroundColor Cyan
+    Write-Host "[1] DEPLOY LOCK (Secure All Active Adapters)" -ForegroundColor Cyan
     Write-Host "[2] REMOVE LOCK (Ångra / Restore Access)" -ForegroundColor Yellow
     Write-Host "[3] REFRESH HARDWARE STATUS" -ForegroundColor Gray
     Write-Host "[4] EXIT TERMINAL" -ForegroundColor Gray
