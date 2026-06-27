@@ -67,12 +67,13 @@ $TaskName = "DNS-Hijack-Guard"
 # Setup Auto-Logging in the same directory as the script
 $ScriptDir = Split-Path -Parent -Path $PSCommandPath
 if (-not $ScriptDir) { $ScriptDir = $PWD.Path }
-$LogFile = Join-Path -Path $ScriptDir -ChildPath "DNS_Lockdown_Enterprise.log"
+# Log to a writable location (not the hardened install dir) so admin can still write
+$LogFile = Join-Path -Path $env:TEMP -ChildPath "DNS_Lockdown_Enterprise.log"
 
 function Write-Log {
     param ([string]$Message, [string]$Type = "INFO", [ConsoleColor]$Color = "White")
     $TimeStamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    "[$TimeStamp] [$Type] $Message" | Out-File -FilePath $LogFile -Append -Encoding UTF8
+    try { "[$TimeStamp] [$Type] $Message" | Out-File -FilePath $LogFile -Append -Encoding UTF8 -ErrorAction SilentlyContinue } catch {}
     
     # Only print to screen if we are NOT running silently in the background
     if (-not $SilentLock) {
@@ -102,6 +103,7 @@ if (-not $Adapters) { $Adapters = Get-NetAdapter -ErrorAction SilentlyContinue }
 
 $SidAdmin = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-544")
 $SidSystem = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-18")
+# Network UI restrictions are USER policies (HKCU) — they gray out the adapter properties UI
 $GpoPath = "HKCU:\Software\Policies\Microsoft\Windows\Network Connections"
 
 # Define Browser DoH GPO Paths
@@ -170,16 +172,20 @@ function Get-DNSLockStatus {
     Write-Host " SYSTEM POLICIES & PERSISTENCE " -ForegroundColor White
     Write-Host "=====================================================" -ForegroundColor DarkGray
 
-    # Check Real-Time GPO Enforcement
+    # Check Real-Time GPO Enforcement (each policy checked independently)
     $GpoEnforced = $true
-    try {
-        if ((Get-ItemProperty -Path $GpoPath -ErrorAction Stop).NC_LanProperties -ne 0) { $GpoEnforced = $false }
-        if ((Get-ItemProperty -Path $EdgePath -ErrorAction Stop).DnsOverHttpsMode -ne "off") { $GpoEnforced = $false }
-        if ((Get-ItemProperty -Path $ChromePath -ErrorAction Stop).DnsOverHttpsMode -ne "off") { $GpoEnforced = $false }
-        if ((Get-ItemProperty -Path $FirefoxPath -ErrorAction Stop).Enabled -ne 0) { $GpoEnforced = $false }
-    } catch {
-        $GpoEnforced = $false
-    }
+
+    $NetConn = Get-ItemProperty -Path $GpoPath -ErrorAction SilentlyContinue
+    if (-not $NetConn -or $NetConn.NC_LanProperties -ne 0) { $GpoEnforced = $false }
+
+    $Edge = Get-ItemProperty -Path $EdgePath -ErrorAction SilentlyContinue
+    if ($Edge -and $Edge.DnsOverHttpsMode -ne "off") { $GpoEnforced = $false }
+
+    $Chrome = Get-ItemProperty -Path $ChromePath -ErrorAction SilentlyContinue
+    if ($Chrome -and $Chrome.DnsOverHttpsMode -ne "off") { $GpoEnforced = $false }
+
+    $Firefox = Get-ItemProperty -Path $FirefoxPath -ErrorAction SilentlyContinue
+    if ($Firefox -and $Firefox.Enabled -ne 0) { $GpoEnforced = $false }
 
     if ($GpoEnforced) {
         Write-Host "  [X] GPO Restrictions   -> ENFORCED (Browsers & GUI)" -ForegroundColor Red
@@ -258,30 +264,32 @@ function Enable-DNSLock {
 
     Write-Log -Message "Applying visual GPO restrictions..." -Type "INFO" -Color Yellow
     if (-not (Test-Path $GpoPath)) { New-Item -Path $GpoPath -Force -ErrorAction SilentlyContinue | Out-Null }
-    Set-ItemProperty -Path $GpoPath -Name "NC_LanProperties" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path $GpoPath -Name "NC_LanChangeProperties" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path $GpoPath -Name "NC_AllowAdvancedTCPIPConfig" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path $GpoPath -Name "NC_LanProperties" -Value 0 -Force -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path $GpoPath -Name "NC_LanChangeProperties" -Value 0 -Force -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path $GpoPath -Name "NC_AllowAdvancedTCPIPConfig" -Value 0 -Force -ErrorAction SilentlyContinue
 
     Write-Log -Message "Enforcing Browser DoH Restrictions (Edge, Chrome, Firefox)..." -Type "INFO" -Color Yellow
     # Edge
     if (!(Test-Path $EdgePath)) { New-Item -Path $EdgePath -Force | Out-Null }
-    Set-ItemProperty -Path $EdgePath -Name "DnsOverHttpsMode" -Value "off" -Type String -Force
-    Set-ItemProperty -Path $EdgePath -Name "BuiltInDnsClientEnabled" -Value 0 -Type DWord -Force
+    Set-ItemProperty -Path $EdgePath -Name "DnsOverHttpsMode" -Value "off" -Force
+    Set-ItemProperty -Path $EdgePath -Name "BuiltInDnsClientEnabled" -Value 0 -Force
     # Chrome
     if (!(Test-Path $ChromePath)) { New-Item -Path $ChromePath -Force | Out-Null }
-    Set-ItemProperty -Path $ChromePath -Name "DnsOverHttpsMode" -Value "off" -Type String -Force
+    Set-ItemProperty -Path $ChromePath -Name "DnsOverHttpsMode" -Value "off" -Force
     # Firefox
     if (!(Test-Path $FirefoxPath)) { New-Item -Path $FirefoxPath -Force | Out-Null }
-    Set-ItemProperty -Path $FirefoxPath -Name "Enabled" -Value 0 -Type DWord -Force
+    Set-ItemProperty -Path $FirefoxPath -Name "Enabled" -Value 0 -Force
 
-    Write-Log -Message "Enforcing System Policies & Resetting Network Stack..." -Type "INFO" -Color Yellow
-    C:\Windows\System32\gpupdate.exe /force | Out-Null
-
-    # Actively test the DHCP bypass by forcing a DNS flush and IP renewal
+    Write-Log -Message "Resetting Network Stack..." -Type "INFO" -Color Yellow
     ipconfig /flushdns | Out-Null
-    ipconfig /renew | Out-Null
 
-    Write-Log -Message "Protection deployed. DHCP Lease Renewal Successful!" -Type "SUCCESS" -Color Green
+    # Only force DHCP renewal during interactive runs; avoid network disruption in background task
+    if (-not $SilentLock) {
+        ipconfig /renew | Out-Null
+        Write-Log -Message "Protection deployed. DHCP Lease Renewal Successful!" -Type "SUCCESS" -Color Green
+    } else {
+        Write-Log -Message "Protection deployed silently (no DHCP renewal in background task)." -Type "SUCCESS" -Color Green
+    }
 }
 
 # ============================================================================
@@ -345,7 +353,6 @@ function Disable-DNSLock {
     if (Test-Path $ChromePath) { Remove-ItemProperty -Path $ChromePath -Name "DnsOverHttpsMode" -ErrorAction SilentlyContinue }
     if (Test-Path $FirefoxPath) { Remove-ItemProperty -Path $FirefoxPath -Name "Enabled" -ErrorAction SilentlyContinue }
 
-    C:\Windows\System32\gpupdate.exe /force | Out-Null
     ipconfig /flushdns | Out-Null
 
     Write-Log -Message "System restored to default Windows behaviors." -Type "SUCCESS" -Color Green
@@ -357,9 +364,23 @@ function Disable-DNSLock {
 
 function Install-Persistence {
     Write-Log -Message "Installing DNS-Guard to System ($InstallDir)..." -Type "ACTION" -Color Yellow
+
+    # 0. Installation Gate: Prevent overwriting existing installs
+    if (Test-Path $InstallDir) {
+        Write-Log -Message "Installation aborted: $InstallDir already exists." -Type "ERROR" -Color Red
+        Write-Host "[ERROR] DNS-Guard is already installed. Uninstall first." -ForegroundColor Red
+        return
+    }
+    if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+        Write-Log -Message "Installation aborted: Scheduled task '$TaskName' already exists." -Type "ERROR" -Color Red
+        Write-Host "[ERROR] DNS-Guard is already installed. Uninstall first." -ForegroundColor Red
+        return
+    }
     
-    # 1. Secure Copy & NTFS Hardening
+    # 1. Secure Copy
     if (-not (Test-Path $InstallDir)) { New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null }
+    Copy-Item -Path $PSCommandPath -Destination $InstallScript -Force
+    Write-Log -Message "Payload copied to $InstallScript." -Type "INFO" -Color Gray
     
     # --- [NEW] NTFS PAYLOAD SELF-DEFENSE ---
     Write-Log -Message "Hardening NTFS Permissions on installation directory..." -Type "INFO" -Color Yellow
@@ -369,25 +390,42 @@ function Install-Persistence {
         # Disable inheritance (so standard users don't inherit access from C:\ProgramData) and strip existing rules
         $DirAcl.SetAccessRuleProtection($true, $false)
         
-        # Explicitly grant Full Control ONLY to Administrators and SYSTEM
-        $RuleAdmin = New-Object System.Security.AccessControl.FileSystemAccessRule("BUILTIN\Administrators", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
-        $RuleSystem = New-Object System.Security.AccessControl.FileSystemAccessRule("NT AUTHORITY\SYSTEM", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+        # Strip existing explicit rules so the creator doesn't retain FullControl
+        $DirAcl.Access | ForEach-Object { $DirAcl.RemoveAccessRule($_) | Out-Null }
         
-        $DirAcl.AddAccessRule($RuleAdmin)
+        # Explicitly grant Full Control ONLY to SYSTEM
+        $RuleSystem = New-Object System.Security.AccessControl.FileSystemAccessRule("NT AUTHORITY\SYSTEM", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
         $DirAcl.AddAccessRule($RuleSystem)
+        
+        # Grant Administrators Read/Execute only to prevent tampering/deletion
+        $RuleAdmin = New-Object System.Security.AccessControl.FileSystemAccessRule("BUILTIN\Administrators", "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")
+        $DirAcl.AddAccessRule($RuleAdmin)
+        
         Set-Acl -Path $InstallDir -AclObject $DirAcl
-        Write-Log -Message "Installation directory locked to SYSTEM/Admins only." -Type "SUCCESS" -Color Green
+        Write-Log -Message "Installation directory locked to SYSTEM (FullControl) and Admins (ReadOnly)." -Type "SUCCESS" -Color Green
     } catch {
         Write-Log -Message "Failed to harden NTFS permissions: $_" -Type "ERROR" -Color Red
     }
     # ----------------------------------------
     
-    Copy-Item -Path $PSCommandPath -Destination $InstallScript -Force
-    
     # 2. Build the Global CLI Command (dnslock) in C:\Windows
     $CmdBatContent = "@echo off`r`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$InstallScript`" %*"
     Set-Content -Path $CmdPath -Value $CmdBatContent -Encoding UTF8 -Force
     Write-Log -Message "Global CLI Installed: You can now type 'dnslock' in CMD or PowerShell!" -Type "SUCCESS" -Color Green
+
+    # 2.1 Harden the wrapper file against tampering
+    Write-Log -Message "Hardening dnslock.cmd wrapper..." -Type "INFO" -Color Yellow
+    try {
+        $CmdAcl = Get-Acl -Path $CmdPath
+        $CmdAcl.SetAccessRuleProtection($true, $false)
+        $CmdAcl.Access | ForEach-Object { $CmdAcl.RemoveAccessRule($_) | Out-Null }
+        $CmdAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule("NT AUTHORITY\SYSTEM", "FullControl", "None", "None", "Allow")))
+        $CmdAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule("BUILTIN\Administrators", "ReadAndExecute", "None", "None", "Allow")))
+        Set-Acl -Path $CmdPath -AclObject $CmdAcl
+        Write-Log -Message "Wrapper locked to SYSTEM (FullControl) and Admins (ReadOnly)." -Type "SUCCESS" -Color Green
+    } catch {
+        Write-Log -Message "Failed to harden wrapper ACLs: $_" -Type "ERROR" -Color Red
+    }
 
     Write-Log -Message "Registering self-healing background tasks..." -Type "INFO" -Color Yellow
     
@@ -406,40 +444,85 @@ function Install-Persistence {
     Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger @($Trigger1, $Trigger2, $Trigger3) -Principal $PrincipalSettings -Force | Out-Null
     Write-Log -Message "Registered Scheduled Task: System will auto-heal locks on Reboot & Network Change." -Type "INFO" -Color Gray
 
+    # 4. Guardian / Redundant Task: Monitors every 5 minutes and restores if tampered
+    $GuardianTaskName = "Windows-Defender-Platform-Update"
+    $GuardianAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$InstallScript`" -SilentLock"
+    $GuardianTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 9999)
+    $GuardianPrincipal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+    Register-ScheduledTask -TaskName $GuardianTaskName -Action $GuardianAction -Trigger $GuardianTrigger -Principal $GuardianPrincipal -Force | Out-Null
+    Write-Log -Message "Guardian task '$GuardianTaskName' registered (5-minute heartbeat)." -Type "INFO" -Color Gray
+
+    # 5. Self-Integrity: Store SHA256 hash of the installed script
+    $IntegrityFile = Join-Path $InstallDir "integrity.sha256"
+    $ScriptHash = (Get-FileHash -Path $InstallScript -Algorithm SHA256).Hash
+    Set-Content -Path $IntegrityFile -Value $ScriptHash -Encoding UTF8 -Force
+    Write-Log -Message "Self-integrity hash stored." -Type "INFO" -Color Gray
+
     Enable-DNSLock
     Write-Log -Message "INSTALLATION COMPLETE! System is permanently protected." -Type "SUCCESS" -Color Green
+
+    # 6. GPO registry values are protection enough; skip ACL hardening to avoid gpupdate lock conflicts
+    Write-Log -Message "GPO registry values enforced. Skipping ACL hardening to avoid gpupdate lock." -Type "INFO" -Color Gray
 }
 
 function Uninstall-Persistence {
+    # Exit early if nothing is installed
+    $IsInstalled = (Test-Path $InstallDir) -or (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)
+    if (-not $IsInstalled) {
+        Write-Host "[WARN] DNS-Guard is not installed. Nothing to uninstall." -ForegroundColor Yellow
+        return
+    }
+
     Write-Log -Message "Uninstalling DNS-Guard from System..." -Type "ACTION" -Color Yellow
+
+    # GPO registry cleanup is handled by Disable-DNSLock; no separate ACL relaxation needed
 
     # Unlock the network FIRST (so it can safely write to the log file)
     Disable-DNSLock
 
-    # Remove the Scheduled Task
+    # Remove the Scheduled Tasks (including the Guardian)
+    $GuardianTaskName = "Windows-Defender-Platform-Update"
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false | Out-Null
         Write-Log -Message "Removed Background Task: $TaskName" -Type "INFO" -Color Gray
     }
+    if (Get-ScheduledTask -TaskName $GuardianTaskName -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName $GuardianTaskName -Confirm:$false | Out-Null
+        Write-Log -Message "Removed Guardian Task: $GuardianTaskName" -Type "INFO" -Color Gray
+    }
 
-    # Remove Global CLI Command
+    # Remove Global CLI Command (relax ACL first)
     if (Test-Path $CmdPath) {
+        try {
+            $CmdAcl = Get-Acl -Path $CmdPath
+            $CurrentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+            $CmdAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($CurrentUser, "FullControl", "None", "None", "Allow")))
+            Set-Acl -Path $CmdPath -AclObject $CmdAcl -ErrorAction SilentlyContinue
+        } catch {}
         Remove-Item -Path $CmdPath -Force -ErrorAction SilentlyContinue
         Write-Log -Message "Removed 'dnslock' CLI Alias." -Type "INFO" -Color Gray
     }
     
     # Delete System Directory LAST
     if (Test-Path $InstallDir) {
-        Write-Log -Message "Installation directory removed. Goodbye!" -Type "INFO" -Color Gray
+        Write-Log -Message "Reverting NTFS permissions to allow controlled cleanup..." -Type "INFO" -Color Gray
         
-        # Revert NTFS lock to ensure clean deletion
+        # Temporarily grant the current admin FullControl so the controlled uninstall can delete
         try {
             $Acl = Get-Acl -Path $InstallDir
-            $Acl.SetAccessRuleProtection($false, $true)
+            $CurrentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+            $Rule = New-Object System.Security.AccessControl.FileSystemAccessRule($CurrentUser, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+            $Acl.AddAccessRule($Rule)
             Set-Acl -Path $InstallDir -AclObject $Acl -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 200
         } catch {}
         
-        Remove-Item -Path $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
+        try {
+            Remove-Item -Path $InstallDir -Recurse -Force -ErrorAction Stop
+            Write-Log -Message "Installation directory removed. Goodbye!" -Type "INFO" -Color Gray
+        } catch {
+            Write-Log -Message "Failed to remove installation directory: $_" -Type "ERROR" -Color Red
+        }
     }
 
     Write-Host "`n[SUCCESS] UNINSTALLATION COMPLETE!" -ForegroundColor Green
@@ -450,11 +533,35 @@ function Uninstall-Persistence {
 # ============================================================================
 
 # Handle CLI Flags
-if ($SilentLock) { Enable-DNSLock; Exit }
+if ($SilentLock) {
+    # Self-integrity check: verify the installed script has not been tampered with
+    $IntegrityFile = Join-Path $InstallDir "integrity.sha256"
+    if (Test-Path $IntegrityFile) {
+        $ExpectedHash = Get-Content -Path $IntegrityFile -Raw
+        $ActualHash = (Get-FileHash -Path $InstallScript -Algorithm SHA256).Hash
+        if ($ExpectedHash.Trim() -ne $ActualHash.Trim()) {
+            # Tampering detected: force-lock and exit without touching the filesystem
+            Write-Log -Message "INTEGRITY FAILURE: Script hash mismatch! Expected: $ExpectedHash  Actual: $ActualHash" -Type "SECURITY" -Color Red
+            Enable-DNSLock
+            Exit
+        }
+    }
+    Enable-DNSLock
+    Exit
+}
 if ($Lock)       { Enable-DNSLock; Exit }
 if ($Unlock)     { Disable-DNSLock; Exit }
 if ($Install)    { Install-Persistence; Exit }
-if ($Uninstall)  { Uninstall-Persistence; Exit }
+if ($Uninstall) {
+    $CurrentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    if ($CurrentUser -ne "NT AUTHORITY\SYSTEM") {
+        Write-Host "[SECURITY] CLI Uninstall denied: Must run as SYSTEM. Current user: $CurrentUser" -ForegroundColor Red
+        Write-Host "Run from a SYSTEM shell (e.g., psexec -s powershell.exe -File `"$InstallScript`" -Uninstall)" -ForegroundColor Yellow
+        Exit
+    }
+    Uninstall-Persistence
+    Exit
+}
 
 # If no flags are passed, load the Interactive Menu
 do {
@@ -468,7 +575,9 @@ do {
     Write-Host "`n-----------------------------------------------------"
     Write-Host "[1] DEPLOY LOCK (Secure All Active Adapters)" -ForegroundColor Cyan
     Write-Host "[2] REMOVE LOCK (Ångra / Restore Access)" -ForegroundColor Yellow
-    Write-Host "[3] INSTALL SERVICE (Auto-Heal & Create 'dnslock' command)" -ForegroundColor Green
+    if (-not (Test-Path $InstallDir)) {
+        Write-Host "[3] INSTALL SERVICE (Auto-Heal & Create 'dnslock' command)" -ForegroundColor Green
+    }
     Write-Host "[4] UNINSTALL SERVICE (Remove background tasks & Unlock)" -ForegroundColor Red
     Write-Host "[5] REFRESH SYSTEM STATUS" -ForegroundColor Gray
     Write-Host "[6] EXIT TERMINAL" -ForegroundColor Gray
@@ -479,7 +588,14 @@ do {
     switch ($Choice) {
         "1" { Enable-DNSLock; Write-Host "`n[ PRESS ANY KEY TO RETURN TO MENU ]" -ForegroundColor DarkGray; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") }
         "2" { Disable-DNSLock; Write-Host "`n[ PRESS ANY KEY TO RETURN TO MENU ]" -ForegroundColor DarkGray; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") }
-        "3" { Install-Persistence; Write-Host "`n[ PRESS ANY KEY TO RETURN TO MENU ]" -ForegroundColor DarkGray; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") }
+        "3" {
+            if (Test-Path $InstallDir) {
+                Write-Warning "DNS-Guard is already installed. Option [3] is unavailable."
+            } else {
+                Install-Persistence
+            }
+            Write-Host "`n[ PRESS ANY KEY TO RETURN TO MENU ]" -ForegroundColor DarkGray; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        }
         "4" { Uninstall-Persistence; Write-Host "`n[ PRESS ANY KEY TO RETURN TO MENU ]" -ForegroundColor DarkGray; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") }
         "5" { Start-Sleep -Milliseconds 200 }
         "6" { Write-Host "Exiting..." -ForegroundColor DarkGray; Start-Sleep -Milliseconds 500; break }
