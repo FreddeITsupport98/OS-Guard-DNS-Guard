@@ -9,6 +9,7 @@
     - Global CLI: Installs 'dnslock' command to Windows PATH for easy cmd access.
     - Automated Installation: Creates a Scheduled Task to re-apply locks automatically on boot/network change.
     - Background Service: Protects against Windows Updates and driver reinstalls.
+    - Advanced Auditing: UI now tracks active GPO enforcement and Installation status.
 #>
 
 param (
@@ -62,7 +63,7 @@ $InstallScript = Join-Path -Path $InstallDir -ChildPath "DNS_Lockdown.ps1"
 $CmdPath = "C:\Windows\dnslock.cmd"
 $TaskName = "DNS-Hijack-Guard"
 
-# Setup Auto-Logging
+# Setup Auto-Logging in the same directory as the script
 $ScriptDir = Split-Path -Parent -Path $PSCommandPath
 if (-not $ScriptDir) { $ScriptDir = $PWD.Path }
 $LogFile = Join-Path -Path $ScriptDir -ChildPath "DNS_Lockdown_Enterprise.log"
@@ -94,13 +95,15 @@ function Run-SystemAudit {
 
 if (-not $SilentLock) { Run-SystemAudit }
 
+# Fetch all network adapters (excluding hidden virtual ones if possible, but keeping all physical)
 $Adapters = Get-NetAdapter -IncludeHidden:$false -ErrorAction SilentlyContinue
-if (-not $Adapters) { $Adapters = Get-NetAdapter -ErrorAction SilentlyContinue }
+if (-not $Adapters) { $Adapters = Get-NetAdapter -ErrorAction SilentlyContinue } # Fallback
 
 $SidAdmin = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-544")
 $SidSystem = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-18")
 $GpoPath = "HKCU:\Software\Policies\Microsoft\Windows\Network Connections"
 
+# Define Browser DoH GPO Paths
 $EdgePath = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"
 $ChromePath = "HKLM:\SOFTWARE\Policies\Google\Chrome"
 $FirefoxPath = "HKLM:\SOFTWARE\Policies\Mozilla\Firefox\DNSOverHTTPS"
@@ -117,11 +120,13 @@ function Get-DNSLockStatus {
     Write-Host " LIVE HARDWARE ADAPTER STATUS " -ForegroundColor White
     Write-Host "=====================================================" -ForegroundColor DarkGray
 
+    # --- 1. CHECK HARDWARE ADAPTERS ---
     foreach ($Adapter in $Adapters) {
         $Guid = $Adapter.InterfaceGuid
         $AdapterLocked = $false
         $StatusColor = if ($Adapter.Status -eq "Up") { "Green" } else { "DarkGray" }
 
+        # Display Hardware Data
         Write-Host ("  Hardware: {0,-25} | State: {1,-5} | MAC: {2}" -f $Adapter.Name, $Adapter.Status, $Adapter.MacAddress) -ForegroundColor $StatusColor
 
         $SubKeyPaths = @(
@@ -147,28 +152,60 @@ function Get-DNSLockStatus {
             } catch {}
         }
 
+        # Visual Output Logic
         if ($AdapterLocked) {
             Write-Host "  `-> Security: [X] LOCKED (IPv4/IPv6)" -ForegroundColor Red
             Write-Host "-----------------------------------------------------" -ForegroundColor DarkGray
             $AnyLocked = $true
         } else {
-            Write-Host "  `-> Security: [ ] UNLOCKED (Vulnerable)" -ForegroundColor Yellow
+            Write-Host "  `-> Security: [ ] UNLOCKED (Vulnerable)" -ForegroundColor Green
             Write-Host "-----------------------------------------------------" -ForegroundColor DarkGray
             $AllLocked = $false
         }
     }
 
-    if ($AllLocked) { 
-        Write-Host " >>> SYSTEM IS SECURE: ZERO-TRUST PADLOCK ACTIVE <<< " -ForegroundColor White -BackgroundColor DarkRed 
-    } else { 
-        Write-Host " >>> SYSTEM IS UNSECURE: PADLOCK INACTIVE <<< " -ForegroundColor Black -BackgroundColor Yellow 
+    # --- 2. CHECK SYSTEM POLICIES & INSTALLATION ---
+    Write-Host "`n=====================================================" -ForegroundColor DarkGray
+    Write-Host " SYSTEM POLICIES & PERSISTENCE " -ForegroundColor White
+    Write-Host "=====================================================" -ForegroundColor DarkGray
+
+    # Check Real-Time GPO Enforcement
+    $GpoEnforced = $true
+    try {
+        if ((Get-ItemProperty -Path $GpoPath -ErrorAction Stop).NC_LanProperties -ne 0) { $GpoEnforced = $false }
+        if ((Get-ItemProperty -Path $EdgePath -ErrorAction Stop).DnsOverHttpsMode -ne "off") { $GpoEnforced = $false }
+        if ((Get-ItemProperty -Path $ChromePath -ErrorAction Stop).DnsOverHttpsMode -ne "off") { $GpoEnforced = $false }
+        if ((Get-ItemProperty -Path $FirefoxPath -ErrorAction Stop).Enabled -ne 0) { $GpoEnforced = $false }
+    } catch {
+        $GpoEnforced = $false
     }
 
-    # Check if the persistence module is installed
+    if ($GpoEnforced) {
+        Write-Host "  [X] GPO Restrictions   -> ENFORCED (Browsers & GUI)" -ForegroundColor Red
+    } else {
+        Write-Host "  [ ] GPO Restrictions   -> NOT ENFORCED" -ForegroundColor Green
+        $AllLocked = $false # System isn't fully secure if GPOs are missing
+    }
+
+    # Check Service Installation Status
     $TaskExists = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-    if ($TaskExists) {
-        Write-Host " >>> PERSISTENCE : INSTALLED (Auto-Heals on Boot) <<<" -ForegroundColor Green
-        Write-Host " >>> GLOBAL CLI  : INSTALLED (Type 'dnslock' in CMD)<<<" -ForegroundColor Cyan
+    $CmdExists = Test-Path $CmdPath
+
+    if ($TaskExists -and $CmdExists) {
+        Write-Host "  [X] Background Service -> INSTALLED ('dnslock' active)" -ForegroundColor Cyan
+    } else {
+        Write-Host "  [ ] Background Service -> NOT INSTALLED" -ForegroundColor DarkGray
+    }
+
+    Write-Host "-----------------------------------------------------" -ForegroundColor DarkGray
+
+    # Master Status Banner Logic
+    if ($AllLocked -and $GpoEnforced) { 
+        Write-Host " >>> SYSTEM IS SECURE: ZERO-TRUST PADLOCK ACTIVE <<< " -ForegroundColor White -BackgroundColor DarkRed 
+    } elseif ($AnyLocked -or $GpoEnforced) {
+        Write-Host " >>> SYSTEM IS PARTIALLY SECURE: MIXED STATE <<< " -ForegroundColor Black -BackgroundColor Yellow 
+    } else { 
+        Write-Host " >>> SYSTEM IS UNSECURE: PADLOCK INACTIVE <<< " -ForegroundColor White -BackgroundColor DarkGreen 
     }
     
     return $AllLocked
@@ -225,19 +262,21 @@ function Enable-DNSLock {
     Set-ItemProperty -Path $GpoPath -Name "NC_AllowAdvancedTCPIPConfig" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
 
     Write-Log -Message "Enforcing Browser DoH Restrictions (Edge, Chrome, Firefox)..." -Type "INFO" -Color Yellow
+    # Edge
     if (!(Test-Path $EdgePath)) { New-Item -Path $EdgePath -Force | Out-Null }
     Set-ItemProperty -Path $EdgePath -Name "DnsOverHttpsMode" -Value "off" -Type String -Force
     Set-ItemProperty -Path $EdgePath -Name "BuiltInDnsClientEnabled" -Value 0 -Type DWord -Force
-    
+    # Chrome
     if (!(Test-Path $ChromePath)) { New-Item -Path $ChromePath -Force | Out-Null }
     Set-ItemProperty -Path $ChromePath -Name "DnsOverHttpsMode" -Value "off" -Type String -Force
-    
+    # Firefox
     if (!(Test-Path $FirefoxPath)) { New-Item -Path $FirefoxPath -Force | Out-Null }
     Set-ItemProperty -Path $FirefoxPath -Name "Enabled" -Value 0 -Type DWord -Force
 
     Write-Log -Message "Enforcing System Policies & Resetting Network Stack..." -Type "INFO" -Color Yellow
     C:\Windows\System32\gpupdate.exe /force | Out-Null
 
+    # Actively test the DHCP bypass by forcing a DNS flush and IP renewal
     ipconfig /flushdns | Out-Null
     ipconfig /renew | Out-Null
 
@@ -270,6 +309,7 @@ function Disable-DNSLock {
                     foreach ($Rule in $Acl.Access) {
                         try {
                             $RuleSid = $Rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier])
+                            # Remove locks for Admin, SYSTEM, AND the old Everyone rule just in case it was left behind
                             if (($RuleSid.Value -eq "S-1-5-32-544" -or $RuleSid.Value -eq "S-1-5-18" -or $RuleSid.Value -eq "S-1-1-0") -and $Rule.AccessControlType -eq "Deny") {
                                 $RulesToRemove += $Rule
                             }
@@ -399,7 +439,7 @@ do {
     Write-Host "[2] REMOVE LOCK (Ångra / Restore Access)" -ForegroundColor Yellow
     Write-Host "[3] INSTALL SERVICE (Auto-Heal & Create 'dnslock' command)" -ForegroundColor Green
     Write-Host "[4] UNINSTALL SERVICE (Remove background tasks & Unlock)" -ForegroundColor Red
-    Write-Host "[5] REFRESH HARDWARE STATUS" -ForegroundColor Gray
+    Write-Host "[5] REFRESH SYSTEM STATUS" -ForegroundColor Gray
     Write-Host "[6] EXIT TERMINAL" -ForegroundColor Gray
     Write-Host "-----------------------------------------------------"
 
