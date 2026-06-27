@@ -1,1 +1,39 @@
 # dnshijack-protection
+
+# Multi-Layer DNS Vault & UI Lockdown Script
+
+A robust, enterprise-grade PowerShell security tool designed to permanently lock down endpoint DNS configurations. By combining Group Policy Object (GPO) registry overrides with a hyper-targeted Access Control List (ACL) security descriptor, this script physically bars users, administrative accounts, and third-party software from tampering with upstream DNS configurations (such as Control D or NextDNS) while gracefully preserving dynamic DHCP networking functions.
+
+## Features
+
+* **UI Hardening (GPO Layer):** Dynamically applies Group Policy registry tweaks to gray out and completely disable network adapter property modifications inside the Windows Settings app and legacy Control Panel (`ncpa.cpl`).
+* **Zero-Trust Registry Padlock:** Injects explicit `Deny` rules directly onto the adapter's active interfaces subkeys (`HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{GUID}`).
+* **Intelligent Account Targeting (DHCP Bypass):** Avoids sweeping "Deny Everyone" rules which crash DHCP. Instead, it specifically targets `Administrators` and `SYSTEM` groups. This prevents malicious privilege escalation and app-level tampering while allowing the `NT AUTHORITY\LocalService` account to dynamically renew local router IP leases.
+* **Robust Exception Management:** Features integrated translation filters that step over orphaned or "ghost" Security Identifiers (SIDs) left behind by Windows Updates, preventing execution crashes during directory scans.
+* **Comprehensive Logging:** Outputs timestamped operational actions, system policies, and errors directly to a local transaction log file (`DNS_Lockdown.log`) for auditing.
+
+---
+
+## Technical Security Mechanics
+
+| Security Vector | Standard Windows Behavior | Behavior with This Script Active |
+| :--- | :--- | :--- |
+| **Malware & Trojan Hijacking** | Elevated scripts rewrite `NameServer` values to redirect web traffic to phishing infrastructure. | Banned. Even with `SYSTEM` or administrative privileges, registry writes return a hard "Access Denied." |
+| **Human Error / Interface Tampering** | Users modify adapter properties to bypass DNS filtering or troubleshoot manually. | Completely restricted. The Network Connections GUI elements are disabled or grayed out via GPO. |
+| **Filter Bypassing** | Users or background processes switch DNS servers to standard open resolvers (e.g., `8.8.8.8`). | Blocked. The static upstream security perimeter remains locked to your preferred secure DNS provider. |
+| **DHCP IP Allocation** | Standard registry locking drops the adapter into an APIPA (`169.254.x.x`) failure state. | Maintained. The targeted block list permits `LocalService` to fetch and update local network IPs smoothly. |
+
+---
+
+## Deployment & Usage
+
+### Prerequisites
+* Windows 10 or Windows 11.
+* PowerShell 5.1 or PowerShell Core running with **Administrative Privileges**.
+* Pre-configured DNS addresses (the script locks whatever values are active on your network card at the time of execution).
+
+### How to Run
+1. Right-click your PowerShell console and select **Run as Administrator**.
+2. Execute the script:
+   ```powershell
+   .\DNS_Lockdown.ps1
