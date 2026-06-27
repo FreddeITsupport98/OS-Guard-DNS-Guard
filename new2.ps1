@@ -206,6 +206,43 @@ function Get-DNSLockStatus {
 
     Write-Host "-----------------------------------------------------" -ForegroundColor DarkGray
 
+    # --- 3. INTEGRITY CHECK ---
+    Write-Host "`n=====================================================" -ForegroundColor DarkGray
+    Write-Host " INTEGRITY CHECK " -ForegroundColor White
+    Write-Host "=====================================================" -ForegroundColor DarkGray
+    if (Test-Path $InstallScript) {
+        $ExpectedHash = $null
+        try { $ExpectedHash = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WpnPlatform\Settings" -Name "PushConfigBackoffInterval" -ErrorAction Stop).PushConfigBackoffInterval } catch {}
+        if (-not $ExpectedHash -and (Test-Path (Join-Path $InstallDir "integrity.sha256"))) {
+            $ExpectedHash = Get-Content -Path (Join-Path $InstallDir "integrity.sha256") -Raw
+        }
+        if ($ExpectedHash) {
+            $ActualHash = (Get-FileHash -Path $InstallScript -Algorithm SHA256).Hash
+            if ($ExpectedHash.Trim() -eq $ActualHash.Trim()) {
+                Write-Host "  [X] Script Integrity    -> VERIFIED" -ForegroundColor Green
+            } else {
+                Write-Host "  [ ] Script Integrity    -> TAMPER DETECTED" -ForegroundColor Red
+                Write-Host "`n  >>> TAMPER DETECTED! ACTION REQUIRED <<<" -ForegroundColor Black -BackgroundColor Yellow
+                Write-Host "  - Run a full antivirus scan immediately." -ForegroundColor Yellow
+                Write-Host "  - Do NOT use options [1] or [2] (they may run malicious code)." -ForegroundColor Yellow
+                Write-Host "  - Use option [4] to uninstall, then reinstall from a clean source." -ForegroundColor Yellow
+                Write-Host "`n  HOW TO CHECK FOR MALICIOUS TASKS:" -ForegroundColor Cyan
+                Write-Host "  1. Press Win + R, type: taskschd.msc  (press Enter)" -ForegroundColor White
+                Write-Host "  2. Click 'Task Scheduler Library' on the left" -ForegroundColor White
+                Write-Host "  3. Look for tasks you don't recognize (sort by Author)" -ForegroundColor White
+                Write-Host "  4. Double-click suspicious tasks, check the 'Actions' tab" -ForegroundColor White
+                Write-Host "  5. Delete anything running powershell/cmd from weird paths" -ForegroundColor White
+                Write-Host "`n  QUICK POWERShell CHECK (run as admin):" -ForegroundColor Cyan
+                Write-Host "  Get-ScheduledTask | Where-Object {`$_.TaskPath -eq '\' -and `$_.Author -notmatch 'Microsoft'} | Select-Object TaskName, Author, State" -ForegroundColor White
+            }
+        } else {
+            Write-Host "  [ ] Script Integrity    -> NO BASELINE" -ForegroundColor DarkGray
+        }
+    } else {
+        Write-Host "  [ ] Script Integrity    -> NOT INSTALLED" -ForegroundColor DarkGray
+    }
+    Write-Host "-----------------------------------------------------" -ForegroundColor DarkGray
+
     # Master Status Banner Logic
     if ($AllLocked -and $GpoEnforced) { 
         Write-Host " >>> SYSTEM IS SECURE: ZERO-TRUST PADLOCK ACTIVE <<< " -ForegroundColor White -BackgroundColor DarkRed 
@@ -444,19 +481,31 @@ function Install-Persistence {
     Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger @($Trigger1, $Trigger2, $Trigger3) -Principal $PrincipalSettings -Force | Out-Null
     Write-Log -Message "Registered Scheduled Task: System will auto-heal locks on Reboot & Network Change." -Type "INFO" -Color Gray
 
-    # 4. Guardian / Redundant Task: Monitors every 5 minutes and restores if tampered
+    # 4. Guardian 1: Monitors every 5 minutes and restores if tampered
     $GuardianTaskName = "Windows-Defender-Platform-Update"
     $GuardianAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$InstallScript`" -SilentLock"
     $GuardianTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 9999)
     $GuardianPrincipal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
     Register-ScheduledTask -TaskName $GuardianTaskName -Action $GuardianAction -Trigger $GuardianTrigger -Principal $GuardianPrincipal -Force | Out-Null
-    Write-Log -Message "Guardian task '$GuardianTaskName' registered (5-minute heartbeat)." -Type "INFO" -Color Gray
+    Write-Log -Message "Guardian 1 '$GuardianTaskName' registered (5-minute heartbeat)." -Type "INFO" -Color Gray
 
-    # 5. Self-Integrity: Store SHA256 hash of the installed script
-    $IntegrityFile = Join-Path $InstallDir "integrity.sha256"
+    # 4.1 Guardian 2: Additional watcher with a 10-minute interval (attacker must kill both)
+    $Guardian2Name = "Windows-Defender-AM-Updates"
+    $Guardian2Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$InstallScript`" -SilentLock"
+    $Guardian2Trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 10) -RepetitionDuration (New-TimeSpan -Days 9999)
+    $Guardian2Principal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+    Register-ScheduledTask -TaskName $Guardian2Name -Action $Guardian2Action -Trigger $Guardian2Trigger -Principal $Guardian2Principal -Force | Out-Null
+    Write-Log -Message "Guardian 2 '$Guardian2Name' registered (10-minute heartbeat)." -Type "INFO" -Color Gray
+
+    # 5. Self-Integrity: Store SHA256 hash in a misleading registry key (harder to tamper than a file)
+    $IntegrityRegPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WpnPlatform\Settings"
+    if (-not (Test-Path $IntegrityRegPath)) { New-Item -Path $IntegrityRegPath -Force | Out-Null }
     $ScriptHash = (Get-FileHash -Path $InstallScript -Algorithm SHA256).Hash
-    Set-Content -Path $IntegrityFile -Value $ScriptHash -Encoding UTF8 -Force
-    Write-Log -Message "Self-integrity hash stored." -Type "INFO" -Color Gray
+    Set-ItemProperty -Path $IntegrityRegPath -Name "PushConfigBackoffInterval" -Value $ScriptHash -Force -ErrorAction SilentlyContinue
+    # Also store a backup hash in the install dir for redundancy (but registry is the primary check)
+    $IntegrityFile = Join-Path $InstallDir "integrity.sha256"
+    Set-Content -Path $IntegrityFile -Value $ScriptHash -Encoding UTF8 -Force -ErrorAction SilentlyContinue
+    Write-Log -Message "Self-integrity hash stored in registry and file." -Type "INFO" -Color Gray
 
     Enable-DNSLock
     Write-Log -Message "INSTALLATION COMPLETE! System is permanently protected." -Type "SUCCESS" -Color Green
@@ -480,15 +529,26 @@ function Uninstall-Persistence {
     # Unlock the network FIRST (so it can safely write to the log file)
     Disable-DNSLock
 
-    # Remove the Scheduled Tasks (including the Guardian)
+    # Remove the Scheduled Tasks (including both guardians)
     $GuardianTaskName = "Windows-Defender-Platform-Update"
+    $Guardian2Name = "Windows-Defender-AM-Updates"
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false | Out-Null
         Write-Log -Message "Removed Background Task: $TaskName" -Type "INFO" -Color Gray
     }
     if (Get-ScheduledTask -TaskName $GuardianTaskName -ErrorAction SilentlyContinue) {
         Unregister-ScheduledTask -TaskName $GuardianTaskName -Confirm:$false | Out-Null
-        Write-Log -Message "Removed Guardian Task: $GuardianTaskName" -Type "INFO" -Color Gray
+        Write-Log -Message "Removed Guardian 1: $GuardianTaskName" -Type "INFO" -Color Gray
+    }
+    if (Get-ScheduledTask -TaskName $Guardian2Name -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName $Guardian2Name -Confirm:$false | Out-Null
+        Write-Log -Message "Removed Guardian 2: $Guardian2Name" -Type "INFO" -Color Gray
+    }
+    
+    # Remove the integrity hash registry key
+    $IntegrityRegPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WpnPlatform\Settings"
+    if (Test-Path $IntegrityRegPath) {
+        Remove-ItemProperty -Path $IntegrityRegPath -Name "PushConfigBackoffInterval" -ErrorAction SilentlyContinue
     }
 
     # Remove Global CLI Command (relax ACL first)
@@ -535,17 +595,50 @@ function Uninstall-Persistence {
 # Handle CLI Flags
 if ($SilentLock) {
     # Self-integrity check: verify the installed script has not been tampered with
+    $IntegrityRegPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WpnPlatform\Settings"
     $IntegrityFile = Join-Path $InstallDir "integrity.sha256"
-    if (Test-Path $IntegrityFile) {
+    $HashCheckPassed = $true
+
+    # Primary check: registry stored hash (misleading key name)
+    $ExpectedHash = $null
+    try { $ExpectedHash = (Get-ItemProperty -Path $IntegrityRegPath -Name "PushConfigBackoffInterval" -ErrorAction Stop).PushConfigBackoffInterval } catch {}
+
+    if ($ExpectedHash) {
+        $ActualHash = (Get-FileHash -Path $InstallScript -Algorithm SHA256).Hash
+        if ($ExpectedHash.Trim() -ne $ActualHash.Trim()) {
+            Write-Log -Message "INTEGRITY FAILURE: Registry hash mismatch! Expected: $ExpectedHash  Actual: $ActualHash" -Type "SECURITY" -Color Red
+            $HashCheckPassed = $false
+        }
+    } elseif (Test-Path $IntegrityFile) {
+        # Fallback to file hash if registry key is missing
         $ExpectedHash = Get-Content -Path $IntegrityFile -Raw
         $ActualHash = (Get-FileHash -Path $InstallScript -Algorithm SHA256).Hash
         if ($ExpectedHash.Trim() -ne $ActualHash.Trim()) {
-            # Tampering detected: force-lock and exit without touching the filesystem
-            Write-Log -Message "INTEGRITY FAILURE: Script hash mismatch! Expected: $ExpectedHash  Actual: $ActualHash" -Type "SECURITY" -Color Red
-            Enable-DNSLock
-            Exit
+            Write-Log -Message "INTEGRITY FAILURE: File hash mismatch! Expected: $ExpectedHash  Actual: $ActualHash" -Type "SECURITY" -Color Red
+            $HashCheckPassed = $false
         }
     }
+
+    if (-not $HashCheckPassed) {
+        Enable-DNSLock
+        Exit
+    }
+
+    # Guardian: ensure main task still exists and recreate it if deleted
+    $MainTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if (-not $MainTask) {
+        Write-Log -Message "Main task '$TaskName' is missing! Recreating from guardian..." -Type "SECURITY" -Color Red
+        $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$InstallScript`" -SilentLock"
+        $Trigger1 = New-ScheduledTaskTrigger -AtStartup
+        $Trigger2 = New-ScheduledTaskTrigger -AtLogOn
+        $CimClass = Get-CimClass -ClassName MSFT_TaskEventTrigger -Namespace "Root/Microsoft/Windows/TaskScheduler"
+        $Trigger3 = New-CimInstance -CimClass $CimClass -ClientOnly
+        $Trigger3.Subscription = "<QueryList><Query Id='0' Path='Microsoft-Windows-NetworkProfile/Operational'><Select Path='Microsoft-Windows-NetworkProfile/Operational'>*[System[EventID=10000]]</Select></Query></QueryList>"
+        $Trigger3.Enabled = $True
+        $PrincipalSettings = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+        Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger @($Trigger1, $Trigger2, $Trigger3) -Principal $PrincipalSettings -Force | Out-Null
+    }
+
     Enable-DNSLock
     Exit
 }
