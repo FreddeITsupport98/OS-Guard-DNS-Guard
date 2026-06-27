@@ -43,11 +43,11 @@ A robust, enterprise-grade PowerShell security tool designed to permanently lock
 
 By default, Windows has a strict security mechanism enabled (called `Restricted`) that prevents *any* PowerShell scripts from running, even the ones you write yourself. This command changes that rule to a much more practical, balanced security setting.
 
-
 Here is the exact command:
 
 ```powershell
 Set-ExecutionPolicy RemoteSigned
+
 
 
 ### Trade-Offs & Known Limitations
