@@ -435,6 +435,18 @@ function Install-Persistence {
     if (-not (Test-Path $InstallDir)) { New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null }
     Copy-Item -Path $PSCommandPath -Destination $InstallScript -Force
     Write-Log -Message "Payload copied to $InstallScript." -Type "INFO" -Color Gray
+
+    # Pre-build wrapper content and create all files inside $InstallDir BEFORE hardening ACLs
+    $CmdBatContent = "@echo off`r`nC:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$InstallScript`" %*"
+    $CmdPathLocal = Join-Path $InstallDir "dnslock.cmd"
+    Out-File -FilePath $CmdPathLocal -InputObject $CmdBatContent -Encoding ASCII -Force
+    Write-Log -Message "Local wrapper created at $CmdPathLocal." -Type "INFO" -Color Gray
+
+    # Pre-calculate integrity hash and write backup file before hardening
+    $ScriptHash = (Get-FileHash -Path $InstallScript -Algorithm SHA256).Hash
+    $IntegrityFile = Join-Path $InstallDir "integrity.sha256"
+    Set-Content -Path $IntegrityFile -Value $ScriptHash -Encoding UTF8 -Force
+    Write-Log -Message "Self-integrity hash file written." -Type "INFO" -Color Gray
     
     # --- [NEW] NTFS PAYLOAD SELF-DEFENSE ---
     Write-Log -Message "Hardening NTFS Permissions on installation directory..." -Type "INFO" -Color Yellow
@@ -448,15 +460,16 @@ function Install-Persistence {
         $DirAcl.Access | ForEach-Object { $DirAcl.RemoveAccessRule($_) | Out-Null }
         
         # Explicitly grant Full Control ONLY to SYSTEM
-        $RuleSystem = New-Object System.Security.AccessControl.FileSystemAccessRule("NT AUTHORITY\SYSTEM", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+        $RuleSystem = New-Object System.Security.AccessControl.FileSystemAccessRule($SidSystem, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
         $DirAcl.AddAccessRule($RuleSystem)
         
         # Grant Administrators Read/Execute only to prevent tampering/deletion
-        $RuleAdmin = New-Object System.Security.AccessControl.FileSystemAccessRule("BUILTIN\Administrators", "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")
+        $RuleAdmin = New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")
         $DirAcl.AddAccessRule($RuleAdmin)
 
         # Grant Authenticated Users Read/Execute so the CLI wrapper works from non-elevated shells
-        $RuleUsers = New-Object System.Security.AccessControl.FileSystemAccessRule("NT AUTHORITY\Authenticated Users", "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")
+        $SidUsers = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-11")
+        $RuleUsers = New-Object System.Security.AccessControl.FileSystemAccessRule($SidUsers, "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")
         $DirAcl.AddAccessRule($RuleUsers)
         
         Set-Acl -Path $InstallDir -AclObject $DirAcl
@@ -467,18 +480,12 @@ function Install-Persistence {
     # ----------------------------------------
     
     # 2. Build the Global CLI Command (dnslock) in C:\Windows (ASCII encoding, no BOM)
-    $CmdBatContent = "@echo off`r`nC:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$InstallScript`" %*"
     Out-File -FilePath $CmdPath -InputObject $CmdBatContent -Encoding ASCII -Force
     if (-not (Test-Path $CmdPath)) {
         Write-Log -Message "CRITICAL: Wrapper file was not created at $CmdPath!" -Type "ERROR" -Color Red
     } else {
         Write-Log -Message "Global CLI wrapper created at $CmdPath." -Type "SUCCESS" -Color Green
     }
-
-    # 2.1 Also create a copy in the install directory and add it to system PATH (more reliable)
-    $CmdPathLocal = Join-Path $InstallDir "dnslock.cmd"
-    Out-File -FilePath $CmdPathLocal -InputObject $CmdBatContent -Encoding ASCII -Force
-    Write-Log -Message "Local wrapper created at $CmdPathLocal." -Type "INFO" -Color Gray
 
     # 2.2 Add InstallDir to system PATH so dnslock is discoverable from any shell
     Write-Log -Message "Adding $InstallDir to system PATH..." -Type "INFO" -Color Yellow
@@ -503,9 +510,10 @@ function Install-Persistence {
                 $CmdAcl = Get-Acl -Path $WrapperPath
                 $CmdAcl.SetAccessRuleProtection($true, $false)
                 $CmdAcl.Access | ForEach-Object { $CmdAcl.RemoveAccessRule($_) | Out-Null }
-                $CmdAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule("NT AUTHORITY\SYSTEM", "FullControl", "None", "None", "Allow")))
-                $CmdAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule("BUILTIN\Administrators", "FullControl", "None", "None", "Allow")))
-                $CmdAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule("NT AUTHORITY\Authenticated Users", "ReadAndExecute", "None", "None", "Allow")))
+                $CmdAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidSystem, "FullControl", "None", "None", "Allow")))
+                $CmdAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "FullControl", "None", "None", "Allow")))
+                $SidUsers = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-11")
+                $CmdAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidUsers, "ReadAndExecute", "None", "None", "Allow")))
                 Set-Acl -Path $WrapperPath -AclObject $CmdAcl
             } catch {
                 Write-Log -Message "Failed to harden wrapper ACLs for $WrapperPath`: $_" -Type "ERROR" -Color Red
@@ -526,7 +534,7 @@ function Install-Persistence {
     $Trigger3.Subscription = "<QueryList><Query Id='0' Path='Microsoft-Windows-NetworkProfile/Operational'><Select Path='Microsoft-Windows-NetworkProfile/Operational'>*[System[EventID=10000]]</Select></Query></QueryList>"
     $Trigger3.Enabled = $True
 
-    $PrincipalSettings = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+    $PrincipalSettings = New-ScheduledTaskPrincipal -UserId "S-1-5-18" -LogonType ServiceAccount -RunLevel Highest
 
     Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger @($Trigger1, $Trigger2, $Trigger3) -Principal $PrincipalSettings -Force | Out-Null
     Write-Log -Message "Registered Scheduled Task: System will auto-heal locks on Reboot & Network Change." -Type "INFO" -Color Gray
@@ -535,7 +543,7 @@ function Install-Persistence {
     $GuardianTaskName = "Windows-Defender-Platform-Update"
     $GuardianAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$InstallScript`" -SilentLock"
     $GuardianTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 9999)
-    $GuardianPrincipal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+    $GuardianPrincipal = New-ScheduledTaskPrincipal -UserId "S-1-5-18" -LogonType ServiceAccount -RunLevel Highest
     Register-ScheduledTask -TaskName $GuardianTaskName -Action $GuardianAction -Trigger $GuardianTrigger -Principal $GuardianPrincipal -Force | Out-Null
     Write-Log -Message "Guardian 1 '$GuardianTaskName' registered (5-minute heartbeat)." -Type "INFO" -Color Gray
 
@@ -543,7 +551,7 @@ function Install-Persistence {
     $Guardian2Name = "Windows-Defender-AM-Updates"
     $Guardian2Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$InstallScript`" -SilentLock"
     $Guardian2Trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 10) -RepetitionDuration (New-TimeSpan -Days 9999)
-    $Guardian2Principal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+    $Guardian2Principal = New-ScheduledTaskPrincipal -UserId "S-1-5-18" -LogonType ServiceAccount -RunLevel Highest
     Register-ScheduledTask -TaskName $Guardian2Name -Action $Guardian2Action -Trigger $Guardian2Trigger -Principal $Guardian2Principal -Force | Out-Null
     Write-Log -Message "Guardian 2 '$Guardian2Name' registered (10-minute heartbeat)." -Type "INFO" -Color Gray
 
@@ -562,12 +570,8 @@ function Install-Persistence {
     # 5. Self-Integrity: Store SHA256 hash in a misleading registry key (harder to tamper than a file)
     $IntegrityRegPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WpnPlatform\Settings"
     if (-not (Test-Path $IntegrityRegPath)) { New-Item -Path $IntegrityRegPath -Force | Out-Null }
-    $ScriptHash = (Get-FileHash -Path $InstallScript -Algorithm SHA256).Hash
     Set-ItemProperty -Path $IntegrityRegPath -Name "PushConfigBackoffInterval" -Value $ScriptHash -Force -ErrorAction SilentlyContinue
-    # Also store a backup hash in the install dir for redundancy (but registry is the primary check)
-    $IntegrityFile = Join-Path $InstallDir "integrity.sha256"
-    Set-Content -Path $IntegrityFile -Value $ScriptHash -Encoding UTF8 -Force -ErrorAction SilentlyContinue
-    Write-Log -Message "Self-integrity hash stored in registry and file." -Type "INFO" -Color Gray
+    Write-Log -Message "Self-integrity hash stored in registry (backup file already written)." -Type "INFO" -Color Gray
 
     Enable-DNSLock
     Write-Log -Message "INSTALLATION COMPLETE! System is permanently protected." -Type "SUCCESS" -Color Green
@@ -625,8 +629,8 @@ function Uninstall-Persistence {
     if (Test-Path $CmdPath) {
         try {
             $CmdAcl = Get-Acl -Path $CmdPath
-            $CurrentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-            $CmdAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($CurrentUser, "FullControl", "None", "None", "Allow")))
+            $CurrentUserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+            $CmdAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($CurrentUserSid, "FullControl", "None", "None", "Allow")))
             Set-Acl -Path $CmdPath -AclObject $CmdAcl -ErrorAction SilentlyContinue
         } catch {}
         Remove-Item -Path $CmdPath -Force -ErrorAction SilentlyContinue
@@ -654,8 +658,8 @@ function Uninstall-Persistence {
         # Temporarily grant the current admin FullControl so the controlled uninstall can delete
         try {
             $Acl = Get-Acl -Path $InstallDir
-            $CurrentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-            $Rule = New-Object System.Security.AccessControl.FileSystemAccessRule($CurrentUser, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+            $CurrentUserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+            $Rule = New-Object System.Security.AccessControl.FileSystemAccessRule($CurrentUserSid, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
             $Acl.AddAccessRule($Rule)
             Set-Acl -Path $InstallDir -AclObject $Acl -ErrorAction SilentlyContinue
             Start-Sleep -Milliseconds 200
@@ -731,7 +735,8 @@ if ($Unlock)     { Disable-DNSLock; Exit }
 if ($Install)    { Install-Persistence; Exit }
 if ($Uninstall) {
     $CurrentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-    if ($CurrentUser -ne "NT AUTHORITY\SYSTEM") {
+    $CurrentUserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    if ($CurrentUserSid.Value -ne "S-1-5-18") {
         Write-Host "[SECURITY] CLI Uninstall denied: Must run as SYSTEM. Current user: $CurrentUser" -ForegroundColor Red
         Write-Host "Run from a SYSTEM shell (e.g., psexec -s powershell.exe -File `"$InstallScript`" -Uninstall)" -ForegroundColor Yellow
         Exit
