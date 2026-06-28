@@ -344,6 +344,49 @@ function Enable-DNSLock {
     } else {
         Write-Log -Message "Protection deployed silently (no DHCP renewal in background task)." -Type "SUCCESS" -Color Green
     }
+
+    # Final status verification
+    $FailedCount = 0
+    $Adapters = Get-NetAdapter -IncludeHidden:$false -ErrorAction SilentlyContinue
+    if (-not $Adapters) { $Adapters = Get-NetAdapter -ErrorAction SilentlyContinue }
+    foreach ($Adapter in $Adapters) {
+        $Guid = $Adapter.InterfaceGuid
+        $SubKeyPaths = @(
+            "SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$Guid",
+            "SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\$Guid"
+        )
+        foreach ($SubKeyPath in $SubKeyPaths) {
+            $Proto = if ($SubKeyPath -like "*Tcpip6*") { "IPv6" } else { "IPv4" }
+            try {
+                $RegKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($SubKeyPath, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadSubTree, [System.Security.AccessControl.RegistryRights]::ReadPermissions)
+                if ($RegKey) {
+                    $Acl = $RegKey.GetAccessControl()
+                    $HasDeny = $false
+                    foreach ($Rule in $Acl.Access) {
+                        try {
+                            $RuleSid = $Rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier])
+                            if (($RuleSid.Value -eq $SidAdmin.Value -or $RuleSid.Value -eq $SidSystem.Value) -and $Rule.AccessControlType -eq "Deny" -and $Rule.RegistryRights -like "*SetValue*") { $HasDeny = $true }
+                        } catch {}
+                    }
+                    if (-not $HasDeny) { $FailedCount++; Write-Log -Message "Lock missing for adapter $($Adapter.Name) ($Proto)." -Type "ERROR" -Color Red }
+                    $RegKey.Close()
+                }
+            } catch { $FailedCount++; Write-Log -Message "Could not verify lock for adapter $($Adapter.Name) ($Proto)." -Type "ERROR" -Color Red }
+        }
+    }
+    $NetConn = Get-ItemProperty -Path $GpoPath -ErrorAction SilentlyContinue
+    if (-not $NetConn -or $NetConn.NC_LanProperties -ne 0) { $FailedCount++; Write-Log -Message "GPO NC_LanProperties not enforced." -Type "ERROR" -Color Red }
+    $Edge = Get-ItemProperty -Path $EdgePath -ErrorAction SilentlyContinue
+    if ($Edge -and $Edge.DnsOverHttpsMode -ne "off") { $FailedCount++; Write-Log -Message "Edge DoH not disabled." -Type "ERROR" -Color Red }
+    $Chrome = Get-ItemProperty -Path $ChromePath -ErrorAction SilentlyContinue
+    if ($Chrome -and $Chrome.DnsOverHttpsMode -ne "off") { $FailedCount++; Write-Log -Message "Chrome DoH not disabled." -Type "ERROR" -Color Red }
+    $Firefox = Get-ItemProperty -Path $FirefoxPath -ErrorAction SilentlyContinue
+    if ($Firefox -and $Firefox.Enabled -ne 0) { $FailedCount++; Write-Log -Message "Firefox DoH not disabled." -Type "ERROR" -Color Red }
+    if ($FailedCount -eq 0) {
+        Write-Host "[SUCCESS] ALL DNS LOCKS DEPLOYED!" -ForegroundColor Green
+    } else {
+        Write-Host "[PARTIAL] DNS LOCKS DEPLOYED WITH ERRORS! ($FailedCount items failed)" -ForegroundColor Yellow
+    }
 }
 
 # ============================================================================
@@ -410,6 +453,47 @@ function Disable-DNSLock {
     ipconfig /flushdns | Out-Null
 
     Write-Log -Message "System restored to default Windows behaviors." -Type "SUCCESS" -Color Green
+
+    # Final status verification
+    $FailedCount = 0
+    $Adapters = Get-NetAdapter -IncludeHidden:$false -ErrorAction SilentlyContinue
+    if (-not $Adapters) { $Adapters = Get-NetAdapter -ErrorAction SilentlyContinue }
+    foreach ($Adapter in $Adapters) {
+        $Guid = $Adapter.InterfaceGuid
+        $SubKeyPaths = @(
+            "SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$Guid",
+            "SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\$Guid"
+        )
+        foreach ($SubKeyPath in $SubKeyPaths) {
+            $Proto = if ($SubKeyPath -like "*Tcpip6*") { "IPv6" } else { "IPv4" }
+            try {
+                $RegKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($SubKeyPath, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadSubTree, [System.Security.AccessControl.RegistryRights]::ReadPermissions)
+                if ($RegKey) {
+                    $Acl = $RegKey.GetAccessControl()
+                    foreach ($Rule in $Acl.Access) {
+                        try {
+                            $RuleSid = $Rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier])
+                            if (($RuleSid.Value -eq $SidAdmin.Value -or $RuleSid.Value -eq $SidSystem.Value) -and $Rule.AccessControlType -eq "Deny") { $FailedCount++; Write-Log -Message "Lock still present on adapter $($Adapter.Name) ($Proto)." -Type "ERROR" -Color Red }
+                        } catch {}
+                    }
+                    $RegKey.Close()
+                }
+            } catch { Write-Log -Message "Could not verify unlock for adapter $($Adapter.Name) ($Proto)." -Type "WARN" -Color Yellow }
+        }
+    }
+    $NetConn = Get-ItemProperty -Path $GpoPath -ErrorAction SilentlyContinue
+    if ($NetConn -and $NetConn.NC_LanProperties -eq 0) { $FailedCount++; Write-Log -Message "GPO NC_LanProperties still enforced." -Type "ERROR" -Color Red }
+    $Edge = Get-ItemProperty -Path $EdgePath -ErrorAction SilentlyContinue
+    if ($Edge -and $Edge.DnsOverHttpsMode -eq "off") { $FailedCount++; Write-Log -Message "Edge DoH still disabled." -Type "ERROR" -Color Red }
+    $Chrome = Get-ItemProperty -Path $ChromePath -ErrorAction SilentlyContinue
+    if ($Chrome -and $Chrome.DnsOverHttpsMode -eq "off") { $FailedCount++; Write-Log -Message "Chrome DoH still disabled." -Type "ERROR" -Color Red }
+    $Firefox = Get-ItemProperty -Path $FirefoxPath -ErrorAction SilentlyContinue
+    if ($Firefox -and $Firefox.Enabled -eq 0) { $FailedCount++; Write-Log -Message "Firefox DoH still disabled." -Type "ERROR" -Color Red }
+    if ($FailedCount -eq 0) {
+        Write-Host "[SUCCESS] ALL DNS LOCKS REMOVED!" -ForegroundColor Green
+    } else {
+        Write-Host "[PARTIAL] DNS LOCKS REMOVED WITH ERRORS! ($FailedCount items still locked)" -ForegroundColor Yellow
+    }
 }
 
 # ============================================================================
@@ -449,31 +533,54 @@ function Install-Persistence {
     Write-Log -Message "Self-integrity hash file written." -Type "INFO" -Color Gray
     
     # --- [NEW] NTFS PAYLOAD SELF-DEFENSE ---
-    Write-Log -Message "Hardening NTFS Permissions on installation directory..." -Type "INFO" -Color Yellow
+    Write-Log -Message "Hardening NTFS Permissions on installation directory and files..." -Type "INFO" -Color Yellow
     try {
+        $SidUsers = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-11")
+
+        # Set owner to SYSTEM on directory and all existing files (prevents admin takeown)
         $DirAcl = Get-Acl -Path $InstallDir
-        
-        # Disable inheritance (so standard users don't inherit access from C:\ProgramData) and strip existing rules
+        $DirAcl.SetOwner($SidSystem)
+        Set-Acl -Path $InstallDir -AclObject $DirAcl
+        Get-ChildItem -Path $InstallDir -File | ForEach-Object {
+            $FileAcl = Get-Acl -Path $_.FullName
+            $FileAcl.SetOwner($SidSystem)
+            Set-Acl -Path $_.FullName -AclObject $FileAcl
+        }
+
+        # Harden directory ACL
+        $DirAcl = Get-Acl -Path $InstallDir
         $DirAcl.SetAccessRuleProtection($true, $false)
-        
-        # Strip existing explicit rules so the creator doesn't retain FullControl
         $DirAcl.Access | ForEach-Object { $DirAcl.RemoveAccessRule($_) | Out-Null }
         
-        # Explicitly grant Full Control ONLY to SYSTEM
-        $RuleSystem = New-Object System.Security.AccessControl.FileSystemAccessRule($SidSystem, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
-        $DirAcl.AddAccessRule($RuleSystem)
+        # SYSTEM: FullControl
+        $DirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidSystem, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")))
         
-        # Grant Administrators Read/Execute only to prevent tampering/deletion
-        $RuleAdmin = New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")
-        $DirAcl.AddAccessRule($RuleAdmin)
-
-        # Grant Authenticated Users Read/Execute so the CLI wrapper works from non-elevated shells
-        $SidUsers = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-11")
-        $RuleUsers = New-Object System.Security.AccessControl.FileSystemAccessRule($SidUsers, "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")
-        $DirAcl.AddAccessRule($RuleUsers)
+        # Admins: ReadAndExecute only (cannot delete, modify, or change permissions)
+        $DirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")))
+        $DirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "DeleteSubdirectoriesAndFiles", "ContainerInherit,ObjectInherit", "None", "Deny")))
+        $DirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "ChangePermissions", "ContainerInherit,ObjectInherit", "None", "Deny")))
+        $DirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "TakeOwnership", "ContainerInherit,ObjectInherit", "None", "Deny")))
+        
+        # Authenticated Users: ReadAndExecute
+        $DirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidUsers, "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")))
         
         Set-Acl -Path $InstallDir -AclObject $DirAcl
-        Write-Log -Message "Installation directory locked to SYSTEM (FullControl), Admins (ReadOnly), Users (ReadOnly)." -Type "SUCCESS" -Color Green
+
+        # Explicitly harden each file (directory inheritance may not cover existing files perfectly)
+        Get-ChildItem -Path $InstallDir -File | ForEach-Object {
+            $FileAcl = Get-Acl -Path $_.FullName
+            $FileAcl.SetAccessRuleProtection($true, $false)
+            $FileAcl.Access | ForEach-Object { $FileAcl.RemoveAccessRule($_) | Out-Null }
+            $FileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidSystem, "FullControl", "None", "None", "Allow")))
+            $FileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "ReadAndExecute", "None", "None", "Allow")))
+            $FileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "Delete", "None", "None", "Deny")))
+            $FileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "ChangePermissions", "None", "None", "Deny")))
+            $FileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "TakeOwnership", "None", "None", "Deny")))
+            $FileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidUsers, "ReadAndExecute", "None", "None", "Allow")))
+            Set-Acl -Path $_.FullName -AclObject $FileAcl
+        }
+        
+        Write-Log -Message "Installation directory and files locked. Owner=SYSTEM, Admins=ReadOnly+NoDelete." -Type "SUCCESS" -Color Green
     } catch {
         Write-Log -Message "Failed to harden NTFS permissions: $_" -Type "ERROR" -Color Red
     }
@@ -504,15 +611,19 @@ function Install-Persistence {
 
     # 2.3 Harden the wrapper files against tampering (but allow all users to execute them)
     Write-Log -Message "Hardening dnslock wrapper files..." -Type "INFO" -Color Yellow
+    $SidUsers = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-11")
     foreach ($WrapperPath in @($CmdPath, $CmdPathLocal)) {
         if (Test-Path $WrapperPath) {
             try {
                 $CmdAcl = Get-Acl -Path $WrapperPath
+                $CmdAcl.SetOwner($SidSystem)
                 $CmdAcl.SetAccessRuleProtection($true, $false)
                 $CmdAcl.Access | ForEach-Object { $CmdAcl.RemoveAccessRule($_) | Out-Null }
                 $CmdAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidSystem, "FullControl", "None", "None", "Allow")))
-                $CmdAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "FullControl", "None", "None", "Allow")))
-                $SidUsers = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-11")
+                $CmdAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "ReadAndExecute", "None", "None", "Allow")))
+                $CmdAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "Delete", "None", "None", "Deny")))
+                $CmdAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "ChangePermissions", "None", "None", "Deny")))
+                $CmdAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "TakeOwnership", "None", "None", "Deny")))
                 $CmdAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidUsers, "ReadAndExecute", "None", "None", "Allow")))
                 Set-Acl -Path $WrapperPath -AclObject $CmdAcl
             } catch {
@@ -520,7 +631,7 @@ function Install-Persistence {
             }
         }
     }
-    Write-Log -Message "Wrapper files locked to SYSTEM/Admins (FullControl) and Users (ReadAndExecute)." -Type "SUCCESS" -Color Green
+    Write-Log -Message "Wrapper files locked to SYSTEM (FullControl), Admins (ReadOnly+NoDelete), Users (ReadAndExecute)." -Type "SUCCESS" -Color Green
 
     Write-Log -Message "Registering self-healing background tasks..." -Type "INFO" -Color Yellow
     
@@ -578,6 +689,76 @@ function Install-Persistence {
 
     # 6. GPO registry values are protection enough; skip ACL hardening to avoid gpupdate lock conflicts
     Write-Log -Message "GPO registry values enforced. Skipping ACL hardening to avoid gpupdate lock." -Type "INFO" -Color Gray
+
+    # Final status verification
+    $FailedCount = 0
+    if (-not (Test-Path $InstallDir)) { $FailedCount++; Write-Log -Message "Install directory $InstallDir missing." -Type "ERROR" -Color Red }
+    if (-not (Test-Path $InstallScript)) { $FailedCount++; Write-Log -Message "Install script $InstallScript missing." -Type "ERROR" -Color Red }
+    if (-not (Test-Path $CmdPath)) { $FailedCount++; Write-Log -Message "Global CLI wrapper $CmdPath missing." -Type "ERROR" -Color Red }
+    if (-not (Test-Path $IntegrityFile)) { $FailedCount++; Write-Log -Message "Integrity file $IntegrityFile missing." -Type "ERROR" -Color Red }
+    if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) { $FailedCount++; Write-Log -Message "Main task $TaskName missing." -Type "ERROR" -Color Red }
+    if (-not (Get-ScheduledTask -TaskName $GuardianTaskName -ErrorAction SilentlyContinue)) { $FailedCount++; Write-Log -Message "Guardian 1 $GuardianTaskName missing." -Type "ERROR" -Color Red }
+    if (-not (Get-ScheduledTask -TaskName $Guardian2Name -ErrorAction SilentlyContinue)) { $FailedCount++; Write-Log -Message "Guardian 2 $Guardian2Name missing." -Type "ERROR" -Color Red }
+    $CurrentPath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+    if ($CurrentPath -notlike "*$InstallDir*") { $FailedCount++; Write-Log -Message "System PATH does not contain $InstallDir." -Type "ERROR" -Color Red }
+    $WmiFilter = Get-WmiObject -Class __EventFilter -Namespace "root\subscription" -Filter "Name='WindowsUpdateHealthCheck'" -ErrorAction SilentlyContinue
+    if (-not $WmiFilter) { Write-Log -Message "WMI event filter missing." -Type "WARN" -Color Yellow }
+    $WmiConsumer = Get-WmiObject -Class CommandLineEventConsumer -Namespace "root\subscription" -Filter "Name='WindowsUpdateHealthCheck'" -ErrorAction SilentlyContinue
+    if (-not $WmiConsumer) { Write-Log -Message "WMI event consumer missing." -Type "WARN" -Color Yellow }
+    if ($FailedCount -eq 0) {
+        Write-Host "[SUCCESS] INSTALLATION COMPLETE!" -ForegroundColor Green
+    } else {
+        Write-Host "[PARTIAL] INSTALLATION COMPLETE WITH ERRORS! ($FailedCount items missing)" -ForegroundColor Yellow
+    }
+}
+
+function Invoke-AsSystem {
+    param([string]$Command)
+    $TempTaskName = "DNSGuard-Uninstall-Helper"
+    $CommonTemp = "C:\Windows\Temp"
+    $ResultFile = "$CommonTemp\DNSGuard_CleanupResult.txt"
+    $TempScript = "$CommonTemp\DNSGuard_Cleanup.ps1"
+    Write-Log -Message "[DEBUG] Invoke-AsSystem called. CommonTemp=$CommonTemp" -Type "INFO" -Color Yellow
+    try {
+        # Ensure SYSTEM can write to the common temp directory
+        $TempAcl = Get-Acl -Path $CommonTemp
+        $SystemSid = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-18")
+        $TempAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SystemSid, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")))
+        Set-Acl -Path $CommonTemp -AclObject $TempAcl -ErrorAction SilentlyContinue
+        # Write the cleanup command to a temporary script file with error capture
+        $ScriptContent = "try { `$ErrorActionPreference = 'Stop'; $Command; 'SUCCESS' | Out-File -FilePath '$ResultFile' -Encoding UTF8 -Force } catch { `$_.Exception.Message | Out-File -FilePath '$ResultFile' -Encoding UTF8 -Force }"
+        $ScriptContent | Out-File -FilePath $TempScript -Encoding UTF8 -Force
+        Write-Log -Message "[DEBUG] Temp script written to $TempScript" -Type "INFO" -Color Yellow
+        # Use full PowerShell path and execute the temp script
+        $Action = New-ScheduledTaskAction -Execute "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument "-ExecutionPolicy Bypass -File `"$TempScript`""
+        $Principal = New-ScheduledTaskPrincipal -UserId "S-1-5-18" -LogonType ServiceAccount -RunLevel Highest
+        Register-ScheduledTask -TaskName $TempTaskName -Action $Action -Principal $Principal -Force | Out-Null
+        Start-ScheduledTask -TaskName $TempTaskName
+        Write-Log -Message "[DEBUG] SYSTEM task started. Waiting for completion..." -Type "INFO" -Color Yellow
+        # Wait up to 30 seconds, checking every 2 seconds if the task is still registered
+        $MaxWait = 30
+        $Waited = 0
+        while ($Waited -lt $MaxWait) {
+            Start-Sleep -Seconds 2
+            $Waited += 2
+            $Task = Get-ScheduledTask -TaskName $TempTaskName -ErrorAction SilentlyContinue
+            if (-not $Task) { break }
+        }
+        Unregister-ScheduledTask -TaskName $TempTaskName -Confirm:$false | Out-Null
+        Write-Log -Message "[DEBUG] SYSTEM task completed and unregistered." -Type "INFO" -Color Yellow
+        # Read and display the result
+        if (Test-Path $ResultFile) {
+            $Result = Get-Content -Path $ResultFile -Raw
+            Write-Log -Message "[DEBUG] SYSTEM task result: $Result" -Type "INFO" -Color Yellow
+            Remove-Item -Path $ResultFile -Force -ErrorAction SilentlyContinue
+        } else {
+            Write-Log -Message "[DEBUG] No result file found at $ResultFile" -Type "ERROR" -Color Red
+        }
+        # Clean up the temp script
+        Remove-Item -Path $TempScript -Force -ErrorAction SilentlyContinue
+    } catch {
+        Write-Log -Message "SYSTEM helper task failed: $_" -Type "ERROR" -Color Red
+    }
 }
 
 function Uninstall-Persistence {
@@ -625,16 +806,23 @@ function Uninstall-Persistence {
         Remove-ItemProperty -Path $IntegrityRegPath -Name "PushConfigBackoffInterval" -ErrorAction SilentlyContinue
     }
 
-    # Remove Global CLI Command (relax ACL first)
+    # Remove Global CLI Command (relax ACL first) - then delete via SYSTEM helper if needed
     if (Test-Path $CmdPath) {
         try {
             $CmdAcl = Get-Acl -Path $CmdPath
             $CurrentUserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
             $CmdAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($CurrentUserSid, "FullControl", "None", "None", "Allow")))
-            Set-Acl -Path $CmdPath -AclObject $CmdAcl -ErrorAction SilentlyContinue
-        } catch {}
-        Remove-Item -Path $CmdPath -Force -ErrorAction SilentlyContinue
-        Write-Log -Message "Removed 'dnslock' CLI Alias." -Type "INFO" -Color Gray
+            Set-Acl -Path $CmdPath -AclObject $CmdAcl -ErrorAction Stop
+            Remove-Item -Path $CmdPath -Force -ErrorAction Stop
+        } catch {
+            Write-Log -Message "Direct deletion failed for $CmdPath. Spawning SYSTEM cleanup task..." -Type "INFO" -Color Yellow
+            Invoke-AsSystem -Command "takeown.exe /F $CmdPath; icacls.exe $CmdPath /reset; Remove-Item -Path $CmdPath -Force -ErrorAction Stop"
+        }
+        if (Test-Path $CmdPath) {
+            Write-Log -Message "Failed to remove 'dnslock' CLI Alias at $CmdPath." -Type "ERROR" -Color Red
+        } else {
+            Write-Log -Message "Removed 'dnslock' CLI Alias." -Type "INFO" -Color Gray
+        }
     }
 
     # Remove local wrapper and PATH entry
@@ -651,29 +839,47 @@ function Uninstall-Persistence {
         Write-Log -Message "Failed to clean system PATH: $_" -Type "ERROR" -Color Red
     }
     
-    # Delete System Directory LAST
+    # Delete System Directory LAST - use SYSTEM helper if direct deletion fails (hardened ACLs)
     if (Test-Path $InstallDir) {
-        Write-Log -Message "Reverting NTFS permissions to allow controlled cleanup..." -Type "INFO" -Color Gray
-        
-        # Temporarily grant the current admin FullControl so the controlled uninstall can delete
-        try {
-            $Acl = Get-Acl -Path $InstallDir
-            $CurrentUserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
-            $Rule = New-Object System.Security.AccessControl.FileSystemAccessRule($CurrentUserSid, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
-            $Acl.AddAccessRule($Rule)
-            Set-Acl -Path $InstallDir -AclObject $Acl -ErrorAction SilentlyContinue
-            Start-Sleep -Milliseconds 200
-        } catch {}
-        
+        Write-Log -Message "Removing hardened installation directory..." -Type "INFO" -Color Gray
         try {
             Remove-Item -Path $InstallDir -Recurse -Force -ErrorAction Stop
-            Write-Log -Message "Installation directory removed. Goodbye!" -Type "INFO" -Color Gray
+            Write-Log -Message "Installation directory removed." -Type "INFO" -Color Gray
         } catch {
-            Write-Log -Message "Failed to remove installation directory: $_" -Type "ERROR" -Color Red
+            Write-Log -Message "Direct deletion failed (hardened ACLs). Spawning SYSTEM cleanup task..." -Type "INFO" -Color Yellow
+            Invoke-AsSystem -Command "takeown.exe /F $InstallDir /R /D Y; icacls.exe $InstallDir /reset /T; Remove-Item -Path $InstallDir -Recurse -Force -ErrorAction Stop"
+            Start-Sleep -Seconds 3
+            if (Test-Path $InstallDir) {
+                Write-Log -Message "SYSTEM cleanup failed: $InstallDir still exists." -Type "ERROR" -Color Red
+                Write-Log -Message "[DEBUG] Directory contents: $(Get-ChildItem -Path $InstallDir -Force | Select-Object Name | Out-String)" -Type "ERROR" -Color Red
+            } else {
+                Write-Log -Message "Installation directory removed by SYSTEM. Goodbye!" -Type "INFO" -Color Gray
+            }
         }
     }
 
-    Write-Host "`n[SUCCESS] UNINSTALLATION COMPLETE!" -ForegroundColor Green
+    # Final status verification: check if any artifacts still remain
+    $FailedCount = 0
+    if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { $FailedCount++; Write-Log -Message "Task $TaskName still exists after uninstall." -Type "ERROR" -Color Red }
+    if (Get-ScheduledTask -TaskName $GuardianTaskName -ErrorAction SilentlyContinue) { $FailedCount++; Write-Log -Message "Task $GuardianTaskName still exists after uninstall." -Type "ERROR" -Color Red }
+    if (Get-ScheduledTask -TaskName $Guardian2Name -ErrorAction SilentlyContinue) { $FailedCount++; Write-Log -Message "Task $Guardian2Name still exists after uninstall." -Type "ERROR" -Color Red }
+    if (Test-Path $InstallDir) { $FailedCount++; Write-Log -Message "Install directory $InstallDir still exists after uninstall." -Type "ERROR" -Color Red }
+    if (Test-Path $CmdPath) { $FailedCount++; Write-Log -Message "Global CLI $CmdPath still exists after uninstall." -Type "ERROR" -Color Red }
+    $CmdPathLocal = Join-Path $InstallDir "dnslock.cmd"
+    if (Test-Path $CmdPathLocal) { $FailedCount++; Write-Log -Message "Local wrapper $CmdPathLocal still exists after uninstall." -Type "ERROR" -Color Red }
+    $CurrentPath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+    if ($CurrentPath -like "*$InstallDir*") { $FailedCount++; Write-Log -Message "System PATH still contains $InstallDir after uninstall." -Type "ERROR" -Color Red }
+    if (Test-Path $IntegrityRegPath) { Write-Log -Message "Registry key $IntegrityRegPath still exists after uninstall." -Type "WARN" -Color Yellow }
+    $WmiFilter = Get-WmiObject -Class __EventFilter -Namespace "root\subscription" -Filter "Name='WindowsUpdateHealthCheck'" -ErrorAction SilentlyContinue
+    if ($WmiFilter) { Write-Log -Message "WMI event filter still exists after uninstall." -Type "WARN" -Color Yellow }
+    $WmiConsumer = Get-WmiObject -Class CommandLineEventConsumer -Namespace "root\subscription" -Filter "Name='WindowsUpdateHealthCheck'" -ErrorAction SilentlyContinue
+    if ($WmiConsumer) { Write-Log -Message "WMI event consumer still exists after uninstall." -Type "WARN" -Color Yellow }
+
+    if ($FailedCount -eq 0) {
+        Write-Host "`n[SUCCESS] UNINSTALLATION COMPLETE!" -ForegroundColor Green
+    } else {
+        Write-Host "`n[PARTIAL] UNINSTALLATION COMPLETE WITH ERRORS! ($FailedCount items failed to remove)" -ForegroundColor Yellow
+    }
 }
 
 # ============================================================================
