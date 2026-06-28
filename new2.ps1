@@ -454,32 +454,65 @@ function Install-Persistence {
         # Grant Administrators Read/Execute only to prevent tampering/deletion
         $RuleAdmin = New-Object System.Security.AccessControl.FileSystemAccessRule("BUILTIN\Administrators", "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")
         $DirAcl.AddAccessRule($RuleAdmin)
+
+        # Grant Authenticated Users Read/Execute so the CLI wrapper works from non-elevated shells
+        $RuleUsers = New-Object System.Security.AccessControl.FileSystemAccessRule("NT AUTHORITY\Authenticated Users", "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")
+        $DirAcl.AddAccessRule($RuleUsers)
         
         Set-Acl -Path $InstallDir -AclObject $DirAcl
-        Write-Log -Message "Installation directory locked to SYSTEM (FullControl) and Admins (ReadOnly)." -Type "SUCCESS" -Color Green
+        Write-Log -Message "Installation directory locked to SYSTEM (FullControl), Admins (ReadOnly), Users (ReadOnly)." -Type "SUCCESS" -Color Green
     } catch {
         Write-Log -Message "Failed to harden NTFS permissions: $_" -Type "ERROR" -Color Red
     }
     # ----------------------------------------
     
-    # 2. Build the Global CLI Command (dnslock) in C:\Windows
-    $CmdBatContent = "@echo off`r`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$InstallScript`" %*"
-    Set-Content -Path $CmdPath -Value $CmdBatContent -Encoding UTF8 -Force
-    Write-Log -Message "Global CLI Installed: You can now type 'dnslock' in CMD or PowerShell!" -Type "SUCCESS" -Color Green
-
-    # 2.1 Harden the wrapper file against tampering
-    Write-Log -Message "Hardening dnslock.cmd wrapper..." -Type "INFO" -Color Yellow
-    try {
-        $CmdAcl = Get-Acl -Path $CmdPath
-        $CmdAcl.SetAccessRuleProtection($true, $false)
-        $CmdAcl.Access | ForEach-Object { $CmdAcl.RemoveAccessRule($_) | Out-Null }
-        $CmdAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule("NT AUTHORITY\SYSTEM", "FullControl", "None", "None", "Allow")))
-        $CmdAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule("BUILTIN\Administrators", "ReadAndExecute", "None", "None", "Allow")))
-        Set-Acl -Path $CmdPath -AclObject $CmdAcl
-        Write-Log -Message "Wrapper locked to SYSTEM (FullControl) and Admins (ReadOnly)." -Type "SUCCESS" -Color Green
-    } catch {
-        Write-Log -Message "Failed to harden wrapper ACLs: $_" -Type "ERROR" -Color Red
+    # 2. Build the Global CLI Command (dnslock) in C:\Windows (ASCII encoding, no BOM)
+    $CmdBatContent = "@echo off`r`nC:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$InstallScript`" %*"
+    Out-File -FilePath $CmdPath -InputObject $CmdBatContent -Encoding ASCII -Force
+    if (-not (Test-Path $CmdPath)) {
+        Write-Log -Message "CRITICAL: Wrapper file was not created at $CmdPath!" -Type "ERROR" -Color Red
+    } else {
+        Write-Log -Message "Global CLI wrapper created at $CmdPath." -Type "SUCCESS" -Color Green
     }
+
+    # 2.1 Also create a copy in the install directory and add it to system PATH (more reliable)
+    $CmdPathLocal = Join-Path $InstallDir "dnslock.cmd"
+    Out-File -FilePath $CmdPathLocal -InputObject $CmdBatContent -Encoding ASCII -Force
+    Write-Log -Message "Local wrapper created at $CmdPathLocal." -Type "INFO" -Color Gray
+
+    # 2.2 Add InstallDir to system PATH so dnslock is discoverable from any shell
+    Write-Log -Message "Adding $InstallDir to system PATH..." -Type "INFO" -Color Yellow
+    try {
+        $CurrentPath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+        if ($CurrentPath -notlike "*$InstallDir*") {
+            $NewPath = $CurrentPath + ";" + $InstallDir
+            [Environment]::SetEnvironmentVariable("PATH", $NewPath, "Machine")
+            Write-Log -Message "Added $InstallDir to system PATH." -Type "SUCCESS" -Color Green
+        } else {
+            Write-Log -Message "$InstallDir already in system PATH." -Type "INFO" -Color Gray
+        }
+    } catch {
+        Write-Log -Message "Failed to update system PATH: $_" -Type "ERROR" -Color Red
+    }
+
+    # 2.3 Harden the wrapper files against tampering (but allow all users to execute them)
+    Write-Log -Message "Hardening dnslock wrapper files..." -Type "INFO" -Color Yellow
+    foreach ($WrapperPath in @($CmdPath, $CmdPathLocal)) {
+        if (Test-Path $WrapperPath) {
+            try {
+                $CmdAcl = Get-Acl -Path $WrapperPath
+                $CmdAcl.SetAccessRuleProtection($true, $false)
+                $CmdAcl.Access | ForEach-Object { $CmdAcl.RemoveAccessRule($_) | Out-Null }
+                $CmdAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule("NT AUTHORITY\SYSTEM", "FullControl", "None", "None", "Allow")))
+                $CmdAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule("BUILTIN\Administrators", "FullControl", "None", "None", "Allow")))
+                $CmdAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule("NT AUTHORITY\Authenticated Users", "ReadAndExecute", "None", "None", "Allow")))
+                Set-Acl -Path $WrapperPath -AclObject $CmdAcl
+            } catch {
+                Write-Log -Message "Failed to harden wrapper ACLs for $WrapperPath`: $_" -Type "ERROR" -Color Red
+            }
+        }
+    }
+    Write-Log -Message "Wrapper files locked to SYSTEM/Admins (FullControl) and Users (ReadAndExecute)." -Type "SUCCESS" -Color Green
 
     Write-Log -Message "Registering self-healing background tasks..." -Type "INFO" -Color Yellow
     
@@ -598,6 +631,20 @@ function Uninstall-Persistence {
         } catch {}
         Remove-Item -Path $CmdPath -Force -ErrorAction SilentlyContinue
         Write-Log -Message "Removed 'dnslock' CLI Alias." -Type "INFO" -Color Gray
+    }
+
+    # Remove local wrapper and PATH entry
+    $CmdPathLocal = Join-Path $InstallDir "dnslock.cmd"
+    if (Test-Path $CmdPathLocal) { Remove-Item -Path $CmdPathLocal -Force -ErrorAction SilentlyContinue }
+    try {
+        $CurrentPath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+        if ($CurrentPath -like "*$InstallDir*") {
+            $NewPath = ($CurrentPath -split ';' | Where-Object { $_ -ne $InstallDir }) -join ';'
+            [Environment]::SetEnvironmentVariable("PATH", $NewPath, "Machine")
+            Write-Log -Message "Removed $InstallDir from system PATH." -Type "INFO" -Color Gray
+        }
+    } catch {
+        Write-Log -Message "Failed to clean system PATH: $_" -Type "ERROR" -Color Red
     }
     
     # Delete System Directory LAST
