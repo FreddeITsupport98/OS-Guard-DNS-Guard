@@ -41,8 +41,18 @@ param (
     [switch]$GrantBrowserTime,
     [switch]$ScreenTimeEnforce,
     [switch]$TamperLockout,
+    [switch]$ApproveChildInstall,
+    [switch]$RehardenChildInstall,
     [string]$ChildUser = "Child"
 )
+
+Set-StrictMode -Version Latest
+
+# Validate $ChildUser parameter: must be non-empty and contain only valid Windows username characters
+if ([string]::IsNullOrWhiteSpace($ChildUser) -or $ChildUser -match '[<>"/\|?*]' -or $ChildUser -match '^[\s\.]+$') {
+    Write-Error 'Invalid ChildUser parameter: must be non-empty and not contain invalid characters (< > : " / \ | ? *).'
+    exit 1
+}
 
 # ============================================================================
 # 1. AUTO-ELEVATION & PRE-FLIGHT CHECKS
@@ -52,7 +62,7 @@ param (
 $Principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 $Role = [Security.Principal.WindowsBuiltInRole]::Administrator
 if (-not $Principal.IsInRole($Role)) {
-    if ($Install -or $Uninstall -or $Lock -or $Unlock -or $SilentLock -or $ParentMode -or $SetParentPassword -or $LockNow -or $ProgramScan -or $SetScreenTime -or $ScreenTimeStatus -or $GrantBrowserTime -or $ScreenTimeEnforce -or $TamperLockout) {
+    if ($Install -or $Uninstall -or $Lock -or $Unlock -or $SilentLock -or $ParentMode -or $SetParentPassword -or $LockNow -or $ProgramScan -or $SetScreenTime -or $ScreenTimeStatus -or $GrantBrowserTime -or $ScreenTimeEnforce -or $TamperLockout -or $ApproveChildInstall) {
         Write-Warning "CRITICAL: Administrative privileges required for CLI commands. Access Denied."
         return
     }
@@ -83,6 +93,8 @@ if (-not $Principal.IsInRole($Role)) {
             if ($GrantBrowserTime) { $ArgsString += " -GrantBrowserTime" }
             if ($ScreenTimeEnforce) { $ArgsString += " -ScreenTimeEnforce" }
             if ($TamperLockout) { $ArgsString += " -TamperLockout" }
+            if ($ApproveChildInstall) { $ArgsString += " -ApproveChildInstall" }
+            if ($RehardenChildInstall) { $ArgsString += " -RehardenChildInstall" }
             if ($ChildUser -ne "Child") { $ArgsString += " -ChildUser `"$ChildUser`"" }
 
             $ProcessInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" $ArgsString"
@@ -124,8 +136,8 @@ $ParentModeWatchB64 = "JFJlZ1BhdGggPSAiSEtMTTpcU09GVFdBUkVcTWljcm9zb2Z0XFdpbmRvd
 # Setup Auto-Logging
 $ScriptDir = Split-Path -Parent -Path $PSCommandPath
 if (-not $ScriptDir) { $ScriptDir = $PWD.Path }
-# Log to a writable location (not the hardened install dir) so admin can still write
-$LogFile = Join-Path -Path $env:TEMP -ChildPath "OS_Lockdown_Enterprise.log"
+# Log to a protected location (hardened install dir) so child cannot tamper with logs
+$LogFile = Join-Path -Path $InstallDir -ChildPath "OS_Lockdown_Enterprise.log"
 
 function Write-Log {
     param ([string]$Message, [string]$Type = "INFO", [ConsoleColor]$Color = "White")
@@ -256,7 +268,6 @@ $ChildHivePolicies = @(
     @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "2"; Value = "wordpad.exe" },
     @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "3"; Value = "mspaint.exe" },
     @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "4"; Value = "write.exe" },
-    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "5"; Value = "explorer.exe" },
     # Disable "Open With" dialog to prevent file browsing via Choose Another App
     @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer"; Name = "NoOpenWith"; Value = 1 },
     @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer"; Name = "NoInternetOpenWith"; Value = 1 },
@@ -631,7 +642,9 @@ function Apply-EdgePolicies {
     $UrlBlockPath = Join-Path $EdgePolicyPath "URLBlocklist"
     if (-not (Test-Path $UrlBlockPath)) { New-Item -Path $UrlBlockPath -Force -ErrorAction SilentlyContinue | Out-Null }
     $BlockedUrls = @("edge://settings","edge://flags","edge://extensions","edge://downloads","edge://passwords","edge://history","edge://bookmarks","chrome://settings","chrome://flags","about:config")
-    $i = 1
+    # Find highest existing numeric key so we append rather than overwrite existing blocklists
+    $ExistingKeys = Get-ItemProperty -Path $UrlBlockPath -ErrorAction SilentlyContinue | Get-Member -MemberType NoteProperty | Where-Object { $_.Name -match '^\d+$' } | Select-Object -ExpandProperty Name | ForEach-Object { [int]$_ } | Sort-Object -Descending
+    $i = if ($ExistingKeys) { $ExistingKeys[0] + 1 } else { 1 }
     foreach ($Url in $BlockedUrls) {
         Set-ItemProperty -Path $UrlBlockPath -Name "$i" -Value $Url -Type String -Force -ErrorAction SilentlyContinue
         $i++
@@ -727,14 +740,24 @@ function Set-ParentPassword {
             $Acl.SetAccessRuleProtection($true, $false)
             $Acl.Access | ForEach-Object { $Acl.RemoveAccessRule($_) | Out-Null }
             $Acl.AddAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule($SidSystem, "FullControl", "Allow")))
-            $Acl.AddAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule($SidAdmin, "ReadKey", "Allow")))
+            $Acl.AddAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule($SidAdmin, "WriteKey", "Allow")))
             $RegKey.SetAccessControl($Acl)
             $RegKey.Close()
         }
         # Also write a hardened hash file so the child session can verify during tamper lockout
         $HashFile = Join-Path $InstallDir "parent.hash"
         "$HashStr|$SaltStr" | Set-Content -Path $HashFile -Encoding UTF8 -Force
-        Harden-FileACL -FilePath $HashFile
+        # Harden hash file ACL: only SYSTEM and Admin have access (child cannot read hash to brute-force)
+        $HashAcl = Get-Acl -Path $HashFile
+        $HashAcl.SetOwner($SidSystem)
+        $HashAcl.SetAccessRuleProtection($true, $false)
+        $HashAcl.Access | ForEach-Object { $HashAcl.RemoveAccessRule($_) | Out-Null }
+        $HashAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidSystem, "FullControl", "None", "None", "Allow")))
+        $HashAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "ReadAndExecute", "None", "None", "Allow")))
+        $HashAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "Delete", "None", "None", "Deny")))
+        $HashAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "ChangePermissions", "None", "None", "Deny")))
+        $HashAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "TakeOwnership", "None", "None", "Deny")))
+        Set-Acl -Path $HashFile -AclObject $HashAcl -ErrorAction SilentlyContinue
         Write-Log -Message "Parent Mode salted password hash stored." -Type "SUCCESS" -Color Green
         Write-Host "[SUCCESS] Parent Mode password updated." -ForegroundColor Green
     } catch {
@@ -821,7 +844,7 @@ while ($true) {
         if (-not $Result) {
             $FailureCount++
             if ($FailureCount -ge 3) {
-                try { & "C:\Windows\oslock.cmd" -LockNow } catch { try { Stop-Process -Name "powershell" -Force } catch {} }
+                try { & "C:\Windows\oslock.cmd" -LockNow } catch { try { Stop-Process -Id $PID -Force } catch {} }
                 break
             }
         } else {
@@ -963,6 +986,16 @@ function Test-ScreenTimeLimit {
     $Now = Get-Date
     $Tracker = Reset-ScreenTimeTrackerIfNewDay
 
+    # Check browser allowance first (admin-granted override)
+    if ($Tracker.BrowserAllowanceActive -eq $true) {
+        if ($Tracker.BrowserAllowanceExpiry -and ([DateTime]$Tracker.BrowserAllowanceExpiry) -gt $Now) {
+            return $false
+        } else {
+            $Tracker.BrowserAllowanceActive = $false
+            Update-ScreenTimeTracker -Tracker $Tracker
+        }
+    }
+
     # Check daily hours
     try {
         $StartTime = [DateTime]::ParseExact($Config.DailyStart, "HH:mm", $null)
@@ -984,16 +1017,6 @@ function Test-ScreenTimeLimit {
     $DailyLimit = if ($IsWeekend -and $Config.WeekendDailyMaxMinutes) { $Config.WeekendDailyMaxMinutes } else { $Config.DailyMaxMinutes }
     if ($DailyUsedMin -ge $DailyLimit) { return $true }
 
-    # Check browser allowance
-    if ($Tracker.BrowserAllowanceActive -eq $true) {
-        if ($Tracker.BrowserAllowanceExpiry -and ([DateTime]$Tracker.BrowserAllowanceExpiry) -gt $Now) {
-            return $false
-        } else {
-            $Tracker.BrowserAllowanceActive = $false
-            Update-ScreenTimeTracker -Tracker $Tracker
-        }
-    }
-
     # Check browser max minutes (total daily)
     $BrowserUsedMin = [math]::Floor($Tracker.BrowserSecondsUsed / 60)
     $BrowserLimit = if ($IsWeekend -and $Config.WeekendBrowserMaxMinutes) { $Config.WeekendBrowserMaxMinutes } else { $Config.BrowserMaxMinutes }
@@ -1005,8 +1028,17 @@ function Test-ScreenTimeLimit {
 function Invoke-ScreenTimeEnforcement {
     $Exceeded = Test-ScreenTimeLimit
     $BrowserProcs = @()
+    $ChildSidValue = Get-ChildSid
     foreach ($BrowserName in @("msedge", "chrome", "firefox")) {
-        $Procs = Get-Process -Name $BrowserName -ErrorAction SilentlyContinue
+        $Procs = Get-Process -Name $BrowserName -ErrorAction SilentlyContinue | Where-Object {
+            # Only target browsers owned by the child user (avoid killing admin browsers)
+            if (-not $ChildSidValue) { return $true }
+            try {
+                $Owner = $_.GetOwner().User
+                $OwnerSid = (New-Object System.Security.Principal.NTAccount($Owner)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+                return ($OwnerSid -eq $ChildSidValue)
+            } catch { return $false }
+        }
         if ($Procs) { $BrowserProcs += $Procs }
     }
     if ($Exceeded -and $BrowserProcs) {
@@ -1039,6 +1071,8 @@ function Show-SetScreenTimeDialog {
     $DefaultEnd = if ($ExistingConfig -and $ExistingConfig.DailyEnd) { $ExistingConfig.DailyEnd } else { "20:00" }
     $DefaultDailyMax = if ($ExistingConfig -and $ExistingConfig.DailyMaxMinutes) { [string]$ExistingConfig.DailyMaxMinutes } else { "120" }
     $DefaultBrowserMax = if ($ExistingConfig -and $ExistingConfig.BrowserMaxMinutes) { [string]$ExistingConfig.BrowserMaxMinutes } else { "60" }
+    $DefaultWeekendDailyMax = if ($ExistingConfig -and $ExistingConfig.WeekendDailyMaxMinutes) { [string]$ExistingConfig.WeekendDailyMaxMinutes } else { "180" }
+    $DefaultWeekendBrowserMax = if ($ExistingConfig -and $ExistingConfig.WeekendBrowserMaxMinutes) { [string]$ExistingConfig.WeekendBrowserMaxMinutes } else { "90" }
     $Start = [Microsoft.VisualBasic.Interaction]::InputBox("Daily allowed start time (HH:mm):", "Screen Time", $DefaultStart, -1, -1)
     if ([string]::IsNullOrWhiteSpace($Start)) { return }
     $End = [Microsoft.VisualBasic.Interaction]::InputBox("Daily allowed end time (HH:mm):", "Screen Time", $DefaultEnd, -1, -1)
@@ -1051,11 +1085,15 @@ function Show-SetScreenTimeDialog {
         return
     }
     $tmp = 0
-    $DailyMax = [Microsoft.VisualBasic.Interaction]::InputBox("Daily max computer minutes:", "Screen Time", $DefaultDailyMax, -1, -1)
+    $DailyMax = [Microsoft.VisualBasic.Interaction]::InputBox("Daily max computer minutes (weekday):", "Screen Time", $DefaultDailyMax, -1, -1)
     if ([string]::IsNullOrWhiteSpace($DailyMax) -or -not [int]::TryParse($DailyMax, [ref]$tmp)) { Write-Host "[ERROR] Invalid daily max." -ForegroundColor Red; return }
-    $BrowserMax = [Microsoft.VisualBasic.Interaction]::InputBox("Daily max browser minutes:", "Screen Time", $DefaultBrowserMax, -1, -1)
+    $BrowserMax = [Microsoft.VisualBasic.Interaction]::InputBox("Daily max browser minutes (weekday):", "Screen Time", $DefaultBrowserMax, -1, -1)
     if ([string]::IsNullOrWhiteSpace($BrowserMax) -or -not [int]::TryParse($BrowserMax, [ref]$tmp)) { Write-Host "[ERROR] Invalid browser max." -ForegroundColor Red; return }
-    Set-ScreenTimeConfig -DailyStart $Start -DailyEnd $End -DailyMaxMinutes ([int]$DailyMax) -BrowserMaxMinutes ([int]$BrowserMax) -Enabled $true
+    $WeekendDailyMax = [Microsoft.VisualBasic.Interaction]::InputBox("Daily max computer minutes (weekend):", "Screen Time", $DefaultWeekendDailyMax, -1, -1)
+    if ([string]::IsNullOrWhiteSpace($WeekendDailyMax) -or -not [int]::TryParse($WeekendDailyMax, [ref]$tmp)) { Write-Host "[ERROR] Invalid weekend daily max." -ForegroundColor Red; return }
+    $WeekendBrowserMax = [Microsoft.VisualBasic.Interaction]::InputBox("Daily max browser minutes (weekend):", "Screen Time", $DefaultWeekendBrowserMax, -1, -1)
+    if ([string]::IsNullOrWhiteSpace($WeekendBrowserMax) -or -not [int]::TryParse($WeekendBrowserMax, [ref]$tmp)) { Write-Host "[ERROR] Invalid weekend browser max." -ForegroundColor Red; return }
+    Set-ScreenTimeConfig -DailyStart $Start -DailyEnd $End -DailyMaxMinutes ([int]$DailyMax) -BrowserMaxMinutes ([int]$BrowserMax) -WeekendDailyMaxMinutes ([int]$WeekendDailyMax) -WeekendBrowserMaxMinutes ([int]$WeekendBrowserMax) -Enabled $true
     Write-Host "[SUCCESS] ScreenTime settings updated." -ForegroundColor Green
     Write-Log -Message "Admin updated ScreenTime settings." -Type "ACTION" -Color Magenta
 }
@@ -1289,9 +1327,13 @@ function Enter-ParentMode {
 
     Write-Log -Message "Parent Mode activated by admin. Unlocking system..." -Type "ACTION" -Color Magenta
 
-    # Temporarily unlock everything
+    # Temporarily unlock everything (but keep installer policies and directory ACLs active)
     Disable-OSLock
     Disable-DNSLock
+
+    # Re-apply installer policies so the child cannot install even during Parent Mode
+    Apply-InstallerPolicies
+    Harden-ChildInstallDirectories
 
     # Remove child hive restrictions from live hive if child is currently logged in, and offline hive if not
     $ChildSidValue = Get-ChildSid
@@ -1315,10 +1357,13 @@ function Enter-ParentMode {
     }
     if ($OfflineHive) { Dismount-ChildHive -HiveMount $OfflineHive }
 
-    # Refresh Windows UI so the unlock takes effect immediately
+    # Refresh Windows UI so the unlock takes effect immediately (only current session, not system-wide)
     Write-Log -Message "Refreshing Windows UI after unlock..." -Type "INFO" -Color Gray
     try {
-        Stop-Process -Name "explorer" -Force -ErrorAction SilentlyContinue
+        $CurrentSessionId = (Get-Process -Id $PID).SessionId
+        Get-Process -Name "explorer" -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $CurrentSessionId } | ForEach-Object {
+            Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+        }
         Start-Sleep -Seconds 1
         Start-Process "explorer" -ErrorAction SilentlyContinue
     } catch {
@@ -1338,7 +1383,9 @@ function Enter-ParentMode {
     }
 
     Write-Host "`n[PARENT MODE ACTIVE]" -ForegroundColor Green -BackgroundColor Black
-    Write-Host "  System is UNLOCKED. You can now install, modify settings, or view the child account." -ForegroundColor Green
+    Write-Host "  System UI is UNLOCKED. You can modify settings or view the child account." -ForegroundColor Green
+    Write-Host "  SOFTWARE INSTALLATION RESTRICTED: Installer policies and directory ACLs remain active." -ForegroundColor Yellow
+    Write-Host "  To install software to the child account, use 'Approve Child Install' on the admin desktop." -ForegroundColor Yellow
     Write-Host "  Auto-lock after 5 minutes of inactivity (AFK timer)." -ForegroundColor Yellow
     Write-Host "  Click 'Lock Now' on the admin desktop or run 'oslock -LockNow' to re-lock immediately." -ForegroundColor Yellow
     Write-Host "=====================================================" -ForegroundColor Cyan
@@ -1357,10 +1404,13 @@ function Exit-ParentMode {
     Enable-OSLock
     Enable-DNSLock
 
-    # Refresh Windows UI so the lock takes effect immediately
+    # Refresh Windows UI so the lock takes effect immediately (only current session, not system-wide)
     Write-Log -Message "Refreshing Windows UI after re-lock..." -Type "INFO" -Color Gray
     try {
-        Stop-Process -Name "explorer" -Force -ErrorAction SilentlyContinue
+        $CurrentSessionId = (Get-Process -Id $PID).SessionId
+        Get-Process -Name "explorer" -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $CurrentSessionId } | ForEach-Object {
+            Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+        }
         Start-Sleep -Seconds 1
         Start-Process "explorer" -ErrorAction SilentlyContinue
     } catch {
@@ -1389,7 +1439,8 @@ function New-ParentModeShortcut {
     $Shortcuts = @(
         @{ Name = "Parent Mode.lnk"; Args = "-ParentMode"; Icon = "shell32.dll,48"; Desc = "Enter Parent Mode (unlock system)" },
         @{ Name = "Lock Now.lnk"; Args = "-LockNow"; Icon = "shell32.dll,47"; Desc = "Immediately re-lock the system" },
-        @{ Name = "Continue Parent Mode.lnk"; Args = "-ContinueParentMode"; Icon = "shell32.dll,45"; Desc = "Reset AFK timer while in Parent Mode" }
+        @{ Name = "Continue Parent Mode.lnk"; Args = "-ContinueParentMode"; Icon = "shell32.dll,45"; Desc = "Reset AFK timer while in Parent Mode" },
+        @{ Name = "Approve Child Install.lnk"; Args = "-ApproveChildInstall"; Icon = "shell32.dll,44"; Desc = "Temporarily allow software install to child account (15 min)" }
     )
 
     foreach ($Sc in $Shortcuts) {
@@ -1472,7 +1523,7 @@ function Remove-ParentModeAdminTools {
     #>
     $AdminProfile = $env:USERPROFILE
     $AdminDesktop = Join-Path $AdminProfile "Desktop"
-    foreach ($Name in @("Admin CMD.lnk", "Admin PowerShell.lnk")) {
+    foreach ($Name in @("Admin CMD.lnk", "Admin PowerShell.lnk", "Approve Child Install.lnk")) {
         $Path = Join-Path $AdminDesktop $Name
         if (Test-Path $Path) {
             try {
@@ -1590,15 +1641,14 @@ function Get-ChildInstallDirectories {
     foreach ($ScanPath in $ScanPaths) {
         if (-not (Test-Path $ScanPath)) { continue }
         try {
+            # Single shallow scan for .exe, .dll, and .json instead of three separate recursive calls
             $Candidates = Get-ChildItem -Path $ScanPath -Directory -ErrorAction SilentlyContinue | Where-Object {
                 $Name = $_.Name
                 # Skip Windows system folders that are not user-installed programs
                 if ($Name -match "^(Microsoft|Windows|Temp|Packages|Temp\w*|Media\w*)$") { return $false }
                 # Heuristic: contains .exe or .dll files, or looks like a program folder
-                $HasExe = $null -ne (Get-ChildItem -Path $_.FullName -Filter "*.exe" -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 1)
-                $HasDll = $null -ne (Get-ChildItem -Path $_.FullName -Filter "*.dll" -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 1)
-                $HasConfig = $null -ne (Get-ChildItem -Path $_.FullName -Filter "*.json" -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 1)
-                $HasExe -or $HasDll -or $HasConfig
+                $HasFiles = $null -ne (Get-ChildItem -Path $_.FullName -Include @("*.exe","*.dll","*.json") -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 1)
+                $HasFiles
             }
             foreach ($Candidate in $Candidates) {
                 if (-not $Dirs.Contains($Candidate.FullName)) { $Dirs.Add($Candidate.FullName) }
@@ -1658,6 +1708,12 @@ function Harden-ProgramDirectory {
         $Acl.Access | Where-Object {
             try { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq $ChildSidValue } catch { $false }
         } | ForEach-Object { $Acl.RemoveAccessRule($_) | Out-Null }
+
+        # SYSTEM and Admin: FullControl so the directory remains accessible to admin after scan/reharden
+        $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $SidSystem, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")))
+        $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $SidAdmin, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")))
 
         # Child: ReadAndExecute on files (can run programs), but Deny Modify/Delete/Write on folder+files
         $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
@@ -1736,6 +1792,210 @@ function Scan-And-Harden-ChildPrograms {
 
     Harden-ProgramShortcuts
     Write-Log -Message "Program Guardian: scan complete." -Type "SUCCESS" -Color Green
+}
+
+function Harden-ChildInstallDirectories {
+    <#
+        Proactively hardens per-user install directories in the child profile
+        so the child cannot install software even when Parent Mode is active.
+        Hardens AppData\Local\Programs with ReadAndExecute only for the child.
+    #>
+    $ChildProfilePath = Get-ChildProfilePath
+    if (-not $ChildProfilePath) { return }
+
+    $InstallPaths = @(
+        (Join-Path $ChildProfilePath "AppData\Local\Programs")
+    )
+
+    $ChildSidValue = Get-ChildSid
+    if (-not $ChildSidValue) { return }
+    $ChildSidObj = New-Object System.Security.Principal.SecurityIdentifier($ChildSidValue)
+
+    foreach ($Path in $InstallPaths) {
+        if (-not (Test-Path $Path)) {
+            try { New-Item -ItemType Directory -Path $Path -Force -ErrorAction SilentlyContinue | Out-Null } catch { continue }
+        }
+        try {
+            $Acl = Get-Acl -Path $Path
+            $Acl.SetOwner($SidSystem)
+            $Acl.SetAccessRuleProtection($true, $false)
+
+            $Acl.Access | ForEach-Object { $Acl.RemoveAccessRule($_) | Out-Null }
+
+            $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                $SidSystem, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")))
+            $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                $SidAdmin, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")))
+            $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                $ChildSidObj, "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")))
+            $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                $ChildSidObj, "Modify", "ContainerInherit,ObjectInherit", "None", "Deny")))
+            $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                $ChildSidObj, "Write", "ContainerInherit,ObjectInherit", "None", "Deny")))
+            $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                $ChildSidObj, "Delete", "ContainerInherit,ObjectInherit", "None", "Deny")))
+            $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                $ChildSidObj, "CreateFiles", "ContainerInherit,ObjectInherit", "None", "Deny")))
+
+            Set-Acl -Path $Path -AclObject $Acl -ErrorAction Stop
+            Write-Log -Message "Child install directory hardened: $Path" -Type "INFO" -Color Gray
+        } catch {
+            Write-Log -Message "Failed to harden child install directory $Path`: $_" -Type "WARN" -Color Yellow
+        }
+    }
+}
+
+function Remove-ChildInstallDirectoryHardening {
+    <#
+        Resets ACLs on the child's per-user install directories back to inherited defaults.
+        Used during Disable-OSLock / Uninstall.
+    #>
+    $ChildProfilePath = Get-ChildProfilePath
+    if (-not $ChildProfilePath) { return }
+
+    $InstallPaths = @(
+        (Join-Path $ChildProfilePath "AppData\Local\Programs")
+    )
+
+    foreach ($Path in $InstallPaths) {
+        if (-not (Test-Path $Path)) { continue }
+        try {
+            & icacls.exe $Path /reset /T /C 2>&1 | Out-Null
+            Write-Log -Message "Child install directory ACLs reset: $Path" -Type "INFO" -Color Gray
+        } catch {
+            Write-Log -Message "Failed to reset ACLs on $Path`: $_" -Type "WARN" -Color Yellow
+        }
+    }
+}
+
+function Apply-InstallerPolicies {
+    <#
+        Re-applies only the installer and store-related machine policies.
+        Used during Parent Mode to keep software installation blocked even while unlocked.
+    #>
+    Write-Log -Message "Re-applying installer policies (MSI, Store, USB) during Parent Mode..." -Type "INFO" -Color Yellow
+    $InstallerPolicies = @(
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Installer"; Name = "DisableMSI"; Value = 2 },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Installer"; Name = "DisableUserInstalls"; Value = 2 },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Installer"; Name = "DisableUserInstallsViaModifications"; Value = 1 },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore"; Name = "RemoveWindowsStore"; Value = 1 },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore"; Name = "AutoDownload"; Value = 2 },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore"; Name = "DisableStoreApps"; Value = 1 },
+        @{ Path = "HKLM:\SYSTEM\CurrentControlSet\Services\USBSTOR"; Name = "Start"; Value = 4 }
+    )
+    foreach ($Policy in $InstallerPolicies) {
+        try {
+            if (-not (Test-Path $Policy.Path)) { New-Item -Path $Policy.Path -Force -ErrorAction SilentlyContinue | Out-Null }
+            Set-ItemProperty -Path $Policy.Path -Name $Policy.Name -Value $Policy.Value -Type DWord -Force -ErrorAction SilentlyContinue
+        } catch {
+            Write-Log -Message "Failed to re-apply installer policy $($Policy.Name): $_" -Type "WARN" -Color Yellow
+        }
+    }
+    try { Stop-Service -Name "USBSTOR" -Force -ErrorAction SilentlyContinue } catch {}
+    Write-Log -Message "Installer policies re-applied (MSI blocked, Store removed, USB disabled)." -Type "SUCCESS" -Color Green
+}
+
+function Approve-ChildInstall {
+    <#
+        Prompts for the Parent Mode password and temporarily relaxes ACLs on the
+        child's per-user install directories so the admin can install software.
+        After 15 minutes, a scheduled task re-hardens the directories.
+    #>
+    Write-Host "`n=====================================================" -ForegroundColor Cyan
+    Write-Host " APPROVE CHILD SOFTWARE INSTALL (ADMIN ONLY) " -ForegroundColor Cyan
+    Write-Host "=====================================================" -ForegroundColor Cyan
+
+    if (-not (Test-ParentPassword)) { return }
+
+    Write-Log -Message "Admin approved child software installation. Relaxing install directory ACLs..." -Type "ACTION" -Color Magenta
+
+    $ChildProfilePath = Get-ChildProfilePath
+    if (-not $ChildProfilePath) {
+        Write-Host "[ERROR] Could not locate child profile path." -ForegroundColor Red
+        return
+    }
+
+    $InstallPaths = @(
+        (Join-Path $ChildProfilePath "AppData\Local\Programs")
+    )
+
+    foreach ($Path in $InstallPaths) {
+        if (-not (Test-Path $Path)) { continue }
+        try {
+            $Acl = Get-Acl -Path $Path
+            $ChildSidValue = Get-ChildSid
+            if ($ChildSidValue) {
+                $RulesToRemove = $Acl.Access | Where-Object {
+                    try {
+                        $sid = $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier])
+                        $sid.Value -eq $ChildSidValue -and $_.AccessControlType -eq "Deny"
+                    } catch { $false }
+                }
+                foreach ($Rule in $RulesToRemove) { $Acl.RemoveAccessRule($Rule) | Out-Null }
+            }
+            $Acl.SetOwner($SidAdmin)
+            Set-Acl -Path $Path -AclObject $Acl -ErrorAction Stop
+            Write-Log -Message "Relaxed install directory ACLs: $Path" -Type "INFO" -Color Gray
+        } catch {
+            Write-Log -Message "Failed to relax ACLs on $Path`: $_" -Type "WARN" -Color Yellow
+        }
+    }
+
+    try {
+        $RehardenAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$InstallScript`" -RehardenChildInstall"
+        $RehardenTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(15)
+        $RehardenPrincipal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+        Register-ScheduledTask -TaskName "OSGuard-ApproveInstallReharden" -Action $RehardenAction -Trigger $RehardenTrigger -Principal $RehardenPrincipal -Force | Out-Null
+        Write-Log -Message "Scheduled re-hardening task for 15 minutes from now." -Type "INFO" -Color Gray
+    } catch {
+        Write-Log -Message "Failed to schedule re-hardening task: $_" -Type "WARN" -Color Yellow
+    }
+
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+    [System.Windows.Forms.MessageBox]::Show("Install approval active for 15 minutes.`n`nYou can now install software to the child account.`n`nACLs will be automatically re-hardened after 15 minutes.", "Install Approval", "OK", "Information") | Out-Null
+    Write-Host "[SUCCESS] Install approval active for 15 minutes." -ForegroundColor Green
+}
+
+function Invoke-ChildInstallReharden {
+    <#
+        Re-hardens child install directories after an approval period.
+        Called by the scheduled task created by Approve-ChildInstall.
+    #>
+    Write-Log -Message "Re-hardening child install directories after approval period..." -Type "ACTION" -Color Magenta
+    Harden-ChildInstallDirectories
+    Scan-And-Harden-ChildPrograms
+
+    # LOCKBACK: If Parent Mode is still active, force re-lock the system
+    $ParentModeActive = $false
+    try { $ParentModeActive = (Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -ErrorAction SilentlyContinue).OSGuardParentModeActive -eq 1 } catch {}
+    if ($ParentModeActive) {
+        Write-Log -Message "Lockback triggered: Install approval window expired. Re-locking system..." -Type "SECURITY" -Color Red
+        try { Stop-WindowGuard } catch { Write-Log -Message "Stop-WindowGuard failed during lockback: $_" -Type "WARN" -Color Yellow }
+        Remove-ParentModeAdminTools
+        try {
+            Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeTimestamp" -Value "" -Type String -Force -ErrorAction SilentlyContinue
+        } catch {}
+        Enable-OSLock
+        Enable-DNSLock
+
+        # Restart explorer in user sessions to apply restrictions immediately
+        # Do NOT start explorer from SYSTEM context - let Windows auto-restart it
+        try {
+            Get-Process -Name "explorer" -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ne 0 } | ForEach-Object {
+                Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+            }
+        } catch {
+            Write-Log -Message "Explorer restart during lockback failed: $_" -Type "WARN" -Color Yellow
+        }
+
+        Write-Log -Message "Lockback complete: System re-locked after install approval expired." -Type "SUCCESS" -Color Green
+    }
+
+    if (Get-ScheduledTask -TaskName "OSGuard-ApproveInstallReharden" -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName "OSGuard-ApproveInstallReharden" -Confirm:$false | Out-Null
+        Write-Log -Message "Removed re-hardening scheduled task." -Type "INFO" -Color Gray
+    }
 }
 
 function Install-ProgramGuardian {
@@ -1864,6 +2124,9 @@ function Enable-OSLock {
     # Program Guardian: scan and harden any newly installed programs immediately
     Scan-And-Harden-ChildPrograms
 
+    # Harden per-user install directories so child cannot install even in Parent Mode
+    Harden-ChildInstallDirectories
+
     Write-Log -Message "OS Child Lockdown deployed." -Type "SUCCESS" -Color Green
 
     # Verification
@@ -1913,6 +2176,12 @@ function Disable-OSLock {
     # 1. Remove machine-wide policies
     Remove-MachinePolicies
 
+    # Warn that guardian tasks will re-apply locks unless uninstalled
+    if (-not $SilentLock) {
+        Write-Host "[WARNING] Guardian tasks (5/10 min heartbeat) will re-apply locks soon." -ForegroundColor Yellow
+        Write-Host "          Use option [4] UNINSTALL to permanently remove protection." -ForegroundColor Yellow
+    }
+
     # Clear Parent Mode flags so the AFK watcher doesn't trigger after unlock
     try {
         Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
@@ -1953,6 +2222,7 @@ function Disable-OSLock {
     Remove-GrantBrowserTimeShortcut
     Remove-EdgePolicies
     Remove-ScreenTimeWatcher
+    Remove-ChildInstallDirectoryHardening
 
     Write-Log -Message "OS Child Lockdown removed." -Type "SUCCESS" -Color Green
 }
@@ -2203,8 +2473,19 @@ function Get-LockStatus {
     Write-Host "=====================================================" -ForegroundColor DarkGray
 
     $GpoEnforced = $true
-    $NetConn = Get-ItemProperty -Path $GpoPath -ErrorAction SilentlyContinue
-    if (-not $NetConn -or $NetConn.NC_LanProperties -ne 0) { $GpoEnforced = $false }
+    # Check child hive for network UI policies (admin HKCU is not the target)
+    $ChildNetConn = $null
+    $ChildSidValue = Get-ChildSid
+    if ($ChildSidValue -and (Test-Path "Registry::HKEY_USERS\$ChildSidValue\Software\Policies\Microsoft\Windows\Network Connections")) {
+        $ChildNetConn = Get-ItemProperty -Path "Registry::HKEY_USERS\$ChildSidValue\Software\Policies\Microsoft\Windows\Network Connections" -ErrorAction SilentlyContinue
+    } else {
+        $HiveMount = Mount-ChildHive
+        if ($HiveMount) {
+            $ChildNetConn = Get-ItemProperty -Path "Registry::HKEY_USERS\$HiveMount\Software\Policies\Microsoft\Windows\Network Connections" -ErrorAction SilentlyContinue
+            Dismount-ChildHive -HiveMount $HiveMount
+        }
+    }
+    if (-not $ChildNetConn -or $ChildNetConn.NC_LanProperties -ne 0) { $GpoEnforced = $false }
     $Edge = Get-ItemProperty -Path $EdgePath -ErrorAction SilentlyContinue
     if ($Edge -and $Edge.DnsOverHttpsMode -ne "off") { $GpoEnforced = $false }
     $Chrome = Get-ItemProperty -Path $ChromePath -ErrorAction SilentlyContinue
@@ -2528,16 +2809,21 @@ function Show-CategoryGrid {
     try { $ChildAccount = Get-LocalUser -Name $ChildUser -ErrorAction Stop } catch {}
     $Categories["Child Account"] = ($null -ne $ChildAccount)
 
-    # --- Child Hive (if mountable) ---
+    # --- Child Hive: prefer live session if child is logged in ---
     $HiveMount = $null
-    $ChildProfile = $null
-    try { $ChildProfile = Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue | Where-Object { $_.LocalPath -like "*\$ChildUser" } | Select-Object -First 1 } catch {}
-    if ($ChildProfile) {
-        $NtUserDat = Join-Path $ChildProfile.LocalPath "NTUSER.DAT"
-        if (Test-Path $NtUserDat) {
-            if (Test-Path "Registry::HKEY_USERS\OSGuardChildPolicy") { reg.exe unload "HKU\OSGuardChildPolicy" 2>&1 | Out-Null }
-            $Output = & reg.exe load "HKU\OSGuardChildPolicy" "$NtUserDat" 2>&1
-            if (Test-Path "Registry::HKEY_USERS\OSGuardChildPolicy") { $HiveMount = "OSGuardChildPolicy" }
+    $ChildSidValue = Get-ChildSid
+    if ($ChildSidValue -and (Test-Path "Registry::HKEY_USERS\$ChildSidValue")) {
+        $HiveMount = $ChildSidValue
+    } else {
+        $ChildProfile = $null
+        try { $ChildProfile = Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue | Where-Object { $_.LocalPath -like "*\$ChildUser" } | Select-Object -First 1 } catch {}
+        if ($ChildProfile) {
+            $NtUserDat = Join-Path $ChildProfile.LocalPath "NTUSER.DAT"
+            if (Test-Path $NtUserDat) {
+                if (Test-Path "Registry::HKEY_USERS\OSGuardChildPolicy") { reg.exe unload "HKU\OSGuardChildPolicy" 2>&1 | Out-Null }
+                $Output = & reg.exe load "HKU\OSGuardChildPolicy" "$NtUserDat" 2>&1
+                if (Test-Path "Registry::HKEY_USERS\OSGuardChildPolicy") { $HiveMount = "OSGuardChildPolicy" }
+            }
         }
     }
 
@@ -3072,7 +3358,9 @@ function Install-Persistence {
 
     # 7. Set default Parent Mode password and create requests directory
     Write-Log -Message "Setting default Parent Mode password and creating requests directory..." -Type "INFO" -Color Yellow
-    $DefaultPw = "admin123"
+    $DefaultPw = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 12 | ForEach-Object { [char]$_ })
+    Write-Host "`n[IMPORTANT] Your default Parent Mode password is: $DefaultPw" -ForegroundColor Yellow
+    Write-Host "            Please write it down. You will need it to enter Parent Mode and approve installations." -ForegroundColor Yellow
     $Salt = [byte[]]::new(16)
     [System.Security.Cryptography.RandomNumberGenerator]::Fill($Salt)
     $SaltStr = [Convert]::ToBase64String($Salt)
@@ -3159,6 +3447,7 @@ function Install-Persistence {
     if (-not (Test-Path (Join-Path $AdminDesktop "Parent Mode.lnk"))) { $FailedCount++; Write-Log -Message "Parent Mode shortcut not found on admin desktop." -Type "ERROR" -Color Red }
     if (-not (Test-Path (Join-Path $AdminDesktop "Lock Now.lnk"))) { $FailedCount++; Write-Log -Message "Lock Now shortcut not found on admin desktop." -Type "ERROR" -Color Red }
     if (-not (Test-Path (Join-Path $AdminDesktop "Continue Parent Mode.lnk"))) { $FailedCount++; Write-Log -Message "Continue Parent Mode shortcut not found on admin desktop." -Type "ERROR" -Color Red }
+    if (-not (Test-Path (Join-Path $AdminDesktop "Approve Child Install.lnk"))) { $FailedCount++; Write-Log -Message "Approve Child Install shortcut not found on admin desktop." -Type "ERROR" -Color Red }
     if (-not (Get-ScheduledTask -TaskName $ParentModeWatchName -ErrorAction SilentlyContinue)) { $FailedCount++; Write-Log -Message "Parent Mode watch task $ParentModeWatchName missing." -Type "ERROR" -Color Red }
     if (-not (Test-Path (Join-Path $InstallDir "Requests"))) { $FailedCount++; Write-Log -Message "Requests directory missing." -Type "ERROR" -Color Red }
     if ($FailedCount -eq 0) {
@@ -3243,8 +3532,8 @@ function Uninstall-Persistence {
         if (Test-Path $STFile) { Remove-Item -Path $STFile -Force -ErrorAction SilentlyContinue }
     }
 
-    # Remove the Scheduled Tasks (including guardians, child logon, parent mode watch, program scanner, screen time, and tamper lockout)
-    foreach ($TName in @($TaskName, $Guardian1Name, $Guardian2Name, $ChildLogonTaskName, $ParentModeWatchName, $ProgramScannerName, $ScreenTimeTaskName, "OSGuard-TamperLockout")) {
+    # Remove the Scheduled Tasks (including guardians, child logon, parent mode watch, program scanner, screen time, tamper lockout, and install re-harden)
+    foreach ($TName in @($TaskName, $Guardian1Name, $Guardian2Name, $ChildLogonTaskName, $ParentModeWatchName, $ProgramScannerName, $ScreenTimeTaskName, "OSGuard-TamperLockout", "OSGuard-ApproveInstallReharden")) {
         if (Get-ScheduledTask -TaskName $TName -ErrorAction SilentlyContinue) {
             Unregister-ScheduledTask -TaskName $TName -Confirm:$false | Out-Null
             Write-Log -Message "Removed task: $TName" -Type "INFO" -Color Gray
@@ -3577,6 +3866,8 @@ if ($SetScreenTime) { Show-SetScreenTimeDialog; return }
 if ($ScreenTimeStatus) { Show-ScreenTimeStatus; return }
 if ($GrantBrowserTime) { Show-GrantBrowserTimeDialog; return }
 if ($ScreenTimeEnforce) { Invoke-ScreenTimeEnforcement; return }
+if ($ApproveChildInstall) { Approve-ChildInstall; return }
+if ($RehardenChildInstall) { Invoke-ChildInstallReharden; return }
 if ($LockNow)    { Exit-ParentMode; return }
 if ($Uninstall) {
     $CurrentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -3619,9 +3910,10 @@ do {
     Write-Host "[10] SCREEN TIME STATUS" -ForegroundColor Cyan
     Write-Host "[11] GRANT BROWSER TIME" -ForegroundColor Cyan
     Write-Host "[12] SET PARENT MODE PASSWORD" -ForegroundColor Green
+    Write-Host "[13] APPROVE CHILD INSTALL (15-min window)" -ForegroundColor Green
     Write-Host "-----------------------------------------------------"
 
-    $Choice = Read-Host "Select an administrative action (1-12)"
+    $Choice = Read-Host "Select an administrative action (1-13)"
     $IntegrityStatus = Test-IntegrityStatus
 
     switch ($Choice) {
@@ -3705,6 +3997,15 @@ do {
                 Write-Host "Use option [4] to uninstall, then reinstall from a clean source." -ForegroundColor Yellow
             } else {
                 Set-ParentPassword
+            }
+            Write-Host "`n[ PRESS ANY KEY TO RETURN TO MENU ]" -ForegroundColor DarkGray; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        }
+        "13" {
+            if ($IntegrityStatus -eq $false) {
+                Write-Host "`n[BLOCKED] Option [13] is disabled because the script has been tampered with." -ForegroundColor Red -BackgroundColor Black
+                Write-Host "Use option [4] to uninstall, then reinstall from a clean source." -ForegroundColor Yellow
+            } else {
+                Approve-ChildInstall
             }
             Write-Host "`n[ PRESS ANY KEY TO RETURN TO MENU ]" -ForegroundColor DarkGray; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
         }
