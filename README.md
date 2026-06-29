@@ -15,6 +15,7 @@ Built-in Administrator retains full privileges to install, modify, and unlock.
 - [Features](#features)
 - [Security Architecture](#security-architecture)
 - [OS Child Lockdown](#os-child-lockdown)
+- [About the OS Lockdown Script](#about-the-os-lockdown-script)
 - [Installation](#installation)
 - [CLI Usage](#cli-usage)
 - [Interactive Menu](#interactive-menu)
@@ -31,6 +32,7 @@ Built-in Administrator retains full privileges to install, modify, and unlock.
 - [Features](#features)
 - [Security Architecture](#security-architecture)
 - [OS Child Lockdown](#os-child-lockdown)
+- [About the OS Lockdown Script](#about-the-os-lockdown-script)
 - [Installation](#installation)
 - [CLI Usage](#cli-usage)
 - [Interactive Menu](#interactive-menu)
@@ -154,6 +156,144 @@ The built-in Administrator account is unaffected by all child restrictions and c
 - Use the interactive menu to lock/unlock
 - Install or uninstall the service
 - Modify all system settings
+
+---
+
+## About the OS Lockdown Script
+
+`new2_OS_lockdown.ps1` is the flagship PowerShell hardening engine of the OS-Guard suite. It is designed from the ground up as a **defense-in-depth child safety and network protection system** for Windows 10 and Windows 11. The script is not a simple collection of registry tweaks — it is a fully autonomous, self-healing, tamper-aware enforcement platform that locks down the operating system at multiple layers while preserving full administrator freedom.
+
+### Design Philosophy
+
+The script was built around three core principles:
+
+1. **Child-First, Admin-Free** — Once installed, the child account should require zero ongoing administrator interaction to stay protected. The system auto-heals, auto-relocks, and auto-enforces policies without manual intervention.
+2. **Defense in Depth** — A single registry key or task is not enough. The script deploys overlapping layers: registry ACL locks, Group Policy injections, scheduled task guardians, WMI event subscriptions, file-system ACL hardening, integrity hashing, and real-time monitoring.
+3. **Tamper Awareness** — The script knows when it has been modified. Every sensitive action re-verifies the script's SHA256 integrity hash before executing. If tampering is detected, the interactive menu blocks dangerous options and warns the administrator immediately.
+
+### What the Script Does at a High Level
+
+When you run `new2_OS_lockdown.ps1 -Install`, the script performs a systematic, multi-phase hardening operation:
+
+**Phase 1 — Environment Preparation**
+- Creates the hardened working directory `C:\ProgramData\OSGuard` with ACLs restricting the child to zero access while granting SYSTEM full control and Administrators read/execute access.
+- Establishes the `C:\ProgramData\OSGuard\Requests` directory where the child can write game or browser requests but cannot read, list, or delete files — a one-way communication channel to the admin.
+- Writes the global CLI wrapper `C:\Windows\oslock.cmd` so the `oslock` command is available from any terminal, any directory, without needing to know the install path.
+
+**Phase 2 — DNS & Network Lockdown**
+- Enumerates every active network adapter GUID on the machine.
+- Applies `Deny SetValue` ACLs to `HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{GUID}` and the corresponding `Tcpip6` paths for both the `BUILTIN\Administrators` and `NT AUTHORITY\SYSTEM` SIDs. This prevents anyone — including an elevated admin process — from changing the DNS server configuration on a locked adapter while the script is active.
+- Injects machine-wide browser policies into Edge, Chrome, and Firefox to disable DNS-over-HTTPS (DoH), forcing all DNS queries through the locked adapter configuration.
+- Applies user-level Group Policy restrictions that gray out the adapter properties UI (`ncpa.cpl`) so the child cannot even see the DNS fields, let alone change them.
+
+**Phase 3 — OS Child Lockdown**
+- Creates a passwordless standard user named `Child` (configurable via `-ChildUser`). The account is intentionally passwordless so the child can log in without typing a password, but it is locked into the `Users` group only — never `Administrators`.
+- Password changes are blocked via `net user Child /passwordchg:no /passwordreq:no`.
+- Injects machine-wide (HKLM) policies: UAC maxed (`EnableLUA = 1`, `ConsentPromptBehaviorAdmin = 2`, `PromptOnSecureDesktop = 1`), Windows Store removed (`RemoveWindowsStore = 1`), Windows Installer blocked for standard users (`DisableMSI = 2`, `DisableUserInstalls = 2`), USB storage disabled (`USBSTOR Start = 4`), Windows Script Host disabled (`wscript.exe` / `cscript.exe`), SmartScreen enforced at `Block` level, Fast User Switching disabled, and Windows Update UI blocked.
+- Injects per-user (HKCU) policies into the child's registry hive: Task Manager disabled (`DisableTaskMgr = 1`), Registry Editor disabled (`DisableRegistryTools = 1`), Command Prompt disabled (`DisableCMD = 2`), Run dialog blocked (`NoRun = 1`), Control Panel & Settings hidden (`NoControlPanel = 1`), wallpaper and theme changes blocked, AutoPlay disabled (`NoDriveTypeAutoRun = 255`), Administrative Tools hidden from Start Menu, Add/Remove Programs blocked, password change blocked, Network Connections UI grayed out, right-click context menu disabled, Folder Options hidden, taskbar changes blocked, printer add/remove blocked, and the "This PC" icon hidden from desktop and Start Menu.
+- Mounts the child's `NTUSER.DAT` offline (via `reg load`) to enforce HKCU policies even when the child is not currently logged in, ensuring restrictions survive reboots and logouts.
+
+**Phase 4 — Browser Lockdown**
+- Adds `DisallowRun` entries 51–58 to block `chrome.exe`, `firefox.exe`, `brave.exe`, `opera.exe`, `vivaldi.exe`, `waterfox.exe`, `tor.exe`, and `iexplore.exe`. Only Microsoft Edge remains allowed.
+- Applies deep Edge machine policies: `BookmarkBarEnabled = 0`, `InPrivateModeAvailability = 1`, `DeveloperToolsAvailability = 2`, `DownloadRestrictions = 3`, `SyncDisabled = 1`, `PasswordManagerEnabled = 0`, `ExtensionInstallBlocklist = *`, and a URL blocklist covering `edge://settings`, `edge://extensions`, `edge://flags`, `edge://policy`, and `edge://downloads`. This strips Edge down to a minimal browsing surface where the child cannot install extensions, manage passwords, download files, open dev tools, or use incognito mode.
+
+**Phase 5 — Screen Time Engine**
+- Writes a default `ScreenTime.json` configuration to `C:\ProgramData\OSGuard` with admin-configurable daily start/end hours, daily maximum minutes, and browser-specific maximum minutes.
+- Writes a `ScreenTimeTracker.json` that records daily usage, browser-specific usage, and any granted session allowances.
+- Hardens both JSON files with ACLs: `SYSTEM:FullControl`, `Administrators:Read`, `Child:Deny`.
+- Creates `BrowserLauncher.ps1` on the child's desktop. When the child clicks it, the launcher checks the screen time limit before opening Edge. If time is exhausted, it shows a tamper-proof popup explaining the limit.
+- Creates `Browser Request.lnk` on the child's desktop so the child can request a browser session, but the request itself goes nowhere without admin action.
+- Creates `Grant Browser Time.lnk` on the administrator's desktop. This shortcut requires the Parent Mode password and lets the admin grant 15, 30, 60, or 120 minutes of temporary browser time.
+- Registers the `OSGuard-ScreenTime` scheduled task, which runs every minute as `NT AUTHORITY\SYSTEM` with the `-ScreenTimeEnforce` flag. The task tracks active Edge processes, updates the tracker, and forcefully terminates Edge if the daily or browser-specific limit is exceeded.
+
+**Phase 6 — Exploit Tool & Start Menu Lockdown**
+- Blocks 50+ Windows built-in exploit and system tools via `DisallowRun` entries 1–50: Notepad, WordPad, Paint, Write, Explorer, PowerShell, pwsh, CMD, wscript, cscript, mshta, certutil, bitsadmin, wmic, regsvr32, rundll32, msiexec, msconfig, mmc, eventvwr, fodhelper, computerdefaults, slui, dccw, xwizard, taskkill, ftp, tftp, telnet, curl, robocopy, takeown, icacls, net, net1, schtasks, at, cleanmgr, sdclt, systempropertiesadvanced, ms-settings, control, inetcpl.cpl, appwiz.cpl, compmgmt.msc, diskmgmt.msc, devmgmt.msc, taskmgr, regedit, and perfmon.
+- Applies Start Menu & Taskbar restrictions: `NoStartMenuPinnedList`, `NoStartMenuDragDrop`, `NoTrayContextMenu`, `NoMovingBands`, `NoCloseDragDropBands`, `DisableContextMenusInStart`, `NoBalloonTips`.
+- Hides Start Menu special folders: Network Places, Eject PC, My Games, My Music, My Pictures, My Videos, Downloads, Documents, Recordings, Homegroup, Favorites, Recent Documents, Run, Find, Help, and Logoff.
+- Blocks Notification Center (`DisableNotificationCenter`) and Windows Consumer Features (`DisableWindowsConsumerFeatures`) to remove suggested apps from the Start Menu.
+- Applies additional Explorer hardening: `NoOpenWith`, `NoInternetOpenWith`, `NoSecurityTab`, `NoHardwareTab`, `NoManageMyComputerVerb`.
+
+**Phase 7 — Persistence & Self-Healing**
+- Registers the main scheduled task `OSGuard-SilentLock` that runs at system startup and every network adapter state change, executing `oslock -SilentLock` to re-apply all locks.
+- Registers `OSGuard-Guardian1` (every 5 minutes) and `OSGuard-Guardian2` (every 10 minutes) as independent hidden tasks that re-apply the full lockdown if anything is missing.
+- Registers `OSGuard-ChildLogon` to apply HKCU restrictions directly inside the child's session at every logon.
+- Registers `OSGuard-ProgramScanner` to scan the child profile every 10 minutes for newly installed programs, harden their directories and shortcuts, and refresh the exploit tool blocklist.
+- Registers `OSGuard-ParentModeAFK` as a 1-minute heartbeat that monitors idle time during Parent Mode and auto-triggers `oslock -LockNow` if the admin is idle for more than 5 minutes.
+- Creates a WMI event subscription (`OSGuardWmiHealth`) that monitors the Task Scheduler service. If the service is stopped or its configuration is modified, the subscription auto-triggers a re-lock.
+- Computes a SHA256 integrity hash of the installed script and stores it in the registry under `HKLM\SOFTWARE\Microsoft\WpnPlatform\Settings\OSGuardIntegrity` (a misleading key name) and in a backup file under `C:\ProgramData\OSGuard`. The hash is checked before every sensitive action.
+
+**Phase 8 — Parent Mode & Admin Tools**
+- Implements a password-protected `Parent Mode` that temporarily disables the OS lockdown so the administrator can install software, update drivers, or modify settings. Parent Mode is entered via `oslock -ParentMode` and requires a SHA256-salted password (minimum 8 characters) stored in the registry.
+- While Parent Mode is active, a background `ParentModeWatch.ps1` process monitors for new visible windows. If a new window appears (e.g., the child uses the admin's mouse), a password prompt is shown immediately. Three wrong passwords trigger instant re-lock.
+- Dynamically creates `Admin CMD.lnk` and `Admin PowerShell.lnk` on the admin desktop during Parent Mode for quick elevated terminal access. These are removed automatically when exiting Parent Mode.
+- Provides `oslock -ContinueParentMode` to reset the AFK timer and `oslock -LockNow` to exit Parent Mode and re-lock immediately without waiting for idle timeout.
+
+**Phase 9 — Program Guardian Engine**
+- Scans the child's Desktop, Start Menu, `AppData\Local\Programs`, and `AppData\Roaming\Microsoft\Windows\Start Menu` for program shortcuts and executable directories.
+- Hardens discovered directories with ACLs so the child cannot modify, delete, or tamper with installed software.
+- Refreshes the `DisallowRun` blocklist on every scan to catch any new exploit tools the child may have copied into their profile.
+
+### Script Architecture & Internal Structure
+
+The script is organized into modular functions rather than a linear execution flow:
+
+- **Core Functions** — `Test-Admin`, `Get-IntegrityHash`, `Verify-Integrity`, `Harden-Directory`, `Harden-FileACL`, `Set-RegistryPolicy`, `Remove-RegistryPolicy`, `Get-ChildProfilePath`, `Get-ChildSID`
+- **DNS Lock Functions** — `Get-ActiveAdapters`, `Lock-Adapter`, `Unlock-Adapter`, `Lock-DoH`, `Unlock-DoH`, `Lock-GUI`, `Unlock-GUI`
+- **OS Lock Functions** — `Enable-OSLock`, `Disable-OSLock`, `Apply-ChildHivePolicies`, `Remove-ChildHivePolicies`, `Apply-EdgePolicies`, `Remove-EdgePolicies`
+- **Screen Time Engine** — `Harden-ScreenTimeFile`, `Get-ScreenTimeConfig`, `Set-ScreenTimeConfig`, `Get-ScreenTimeTracker`, `Update-ScreenTimeTracker`, `Reset-ScreenTimeTrackerIfNewDay`, `Test-ScreenTimeLimit`, `Invoke-ScreenTimeEnforcement`, `Show-SetScreenTimeDialog`, `Show-ScreenTimeStatus`, `Show-GrantBrowserTimeDialog`, `New-BrowserLauncher`, `New-BrowserRequestShortcut`, `New-GrantBrowserTimeShortcut`, `Install-ScreenTimeWatcher`, `Remove-ScreenTimeWatcher`
+- **Parent Mode Functions** — `Test-ParentPassword`, `Set-ParentPassword`, `Enter-ParentMode`, `Exit-ParentMode`, `Start-ParentModeWatch`, `Stop-ParentModeWatch`, `Add-ParentModeAdminTools`, `Remove-ParentModeAdminTools`, `Install-ParentModeAFK`, `Remove-ParentModeAFK`
+- **Persistence Functions** — `Install-Persistence`, `Uninstall-Persistence`, `Install-GuardianTasks`, `Remove-GuardianTasks`, `Install-ChildLogonTask`, `Remove-ChildLogonTask`, `Install-WmiSubscription`, `Remove-WmiSubscription`, `Install-ProgramScanner`, `Remove-ProgramScanner`
+- **Interactive UI** — `Show-Menu`, `Show-Status`, `Show-CategoryGrid`, `Show-ChildPanel`
+- **CLI Dispatcher** — The `param` block handles `-Install`, `-Uninstall`, `-Lock`, `-Unlock`, `-SilentLock`, `-ChildLock`, `-ChildUser`, `-ParentMode`, `-SetParentPassword`, `-ChildGameRequest`, `-ContinueParentMode`, `-LockNow`, `-ProgramScan`, `-SetScreenTime`, `-ScreenTimeStatus`, `-GrantBrowserTime`, `-ScreenTimeEnforce`
+
+### File & Registry Footprint
+
+**Installed files and directories:**
+- `C:\ProgramData\OSGuard\` — Main install directory (SYSTEM:FullControl, Administrators:ReadAndExecute)
+- `C:\ProgramData\OSGuard\OS_Lockdown.ps1` — The installed payload copy
+- `C:\ProgramData\OSGuard\integrity_hash.txt` — Integrity hash backup
+- `C:\ProgramData\OSGuard\ParentModeWatch.ps1` — Embedded Base64 watch script (rewritten fresh on every silent heal)
+- `C:\ProgramData\OSGuard\Requests\` — One-way child request directory
+- `C:\ProgramData\OSGuard\ScreenTime.json` — Screen time configuration
+- `C:\ProgramData\OSGuard\ScreenTimeTracker.json` — Screen time usage tracker
+- `C:\ProgramData\OSGuard\BrowserLauncher.ps1` — Child-facing browser launcher
+- `C:\Windows\oslock.cmd` — Global CLI wrapper
+- `C:\Users\<Child>\Desktop\Browser Request.lnk` — Child browser request shortcut
+- `C:\Users\<Admin>\Desktop\Grant Browser Time.lnk` — Admin grant-time shortcut
+- `C:\Users\<Admin>\Desktop\Admin CMD.lnk` and `Admin PowerShell.lnk` — Dynamic Parent Mode tools
+
+**Registry footprint:**
+- `HKLM\SOFTWARE\Microsoft\WpnPlatform\Settings\OSGuardIntegrity` — Integrity hash
+- `HKLM\SOFTWARE\Microsoft\WpnPlatform\Settings\OSGuardParentPasswordHash` — Parent Mode password hash
+- `HKLM\SOFTWARE\Microsoft\WpnPlatform\Settings\OSGuardParentPasswordSalt` — Parent Mode password salt
+- `HKLM\SOFTWARE\Policies\Microsoft\Edge\` — Edge deep lockdown policies
+- `HKLM\SOFTWARE\Policies\Microsoft\Windows\` — Various OS policy branches
+- `HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{GUID}` — DNS ACL locks
+- `HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun` — 50+ exploit tool blocks (in child hive)
+- `HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun` entries 51–58 — Browser blocks (in child hive)
+
+### Who Should Use This Script
+
+`new2_OS_lockdown.ps1` is purpose-built for:
+- **Parents** who want a locked-down, safe Windows environment for their children without buying third-party parental control software.
+- **Shared family PCs** where the child account must be restricted but the administrator account must remain fully functional.
+- **Small organizations** or **schools** that need a lightweight, zero-cost OS hardening layer before deploying full MDM or GPO infrastructure.
+- **IT administrators** who need a **quick, portable, single-file hardening script** that can be deployed via USB, network share, or RMM tool without requiring Group Policy domain infrastructure.
+
+### What This Script Is NOT
+
+- It is **not** a kernel-level security boundary. A determined attacker with physical access, a live USB, or Safe Mode can bypass it.
+- It is **not** a replacement for enterprise MDM or Active Directory Group Policy. It is a local-only enforcement layer.
+- It is **not** anti-malware. It does not scan for viruses or ransomware. It restricts the operating system surface area to reduce the child's ability to cause harm or bypass network protections.
+- It does **not** block the internet. It locks DNS to trusted servers and blocks alternative browsers, but the child can still browse the web through Edge within the configured screen time limits.
+
+### Compatibility
+
+- **Windows 10** (1903 and later) and **Windows 11** (all builds).
+- **PowerShell 5.1** or **PowerShell 7+**.
+- Requires **Administrator** rights for installation and most CLI flags.
+- The `-Uninstall` flag requires **SYSTEM** identity (use `psexec -s` or run from a SYSTEM shell) to prevent the child from uninstalling the protection.
+- Works on **Windows 10/11 Home**, Pro, Enterprise, and Education editions. On Home editions, some `LocalUser` cmdlets may fall back to `net user` automatically.
 
 ---
 
