@@ -3023,12 +3023,35 @@ function Show-TamperLockoutScreen {
         if ($MyExplorer) { Stop-Process -Id $MyExplorer.Id -Force -ErrorAction SilentlyContinue }
     } catch {}
 
+    $script:TamperUnlockSuccess = $false
+
     $form = New-Object System.Windows.Forms.Form
     $form.WindowState = 'Maximized'
     $form.FormBorderStyle = 'None'
     $form.TopMost = $true
     $form.BackColor = [System.Drawing.Color]::Black
     $form.StartPosition = 'CenterScreen'
+    $form.KeyPreview = $true
+
+    # Block Alt+F4 and Escape
+    $form.Add_KeyDown({
+        param($sender, $e)
+        if ($e.Alt -and $e.KeyCode -eq [System.Windows.Forms.Keys]::F4) {
+            $e.Handled = $true
+            $e.SuppressKeyPress = $true
+        }
+        if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Escape) {
+            $e.Handled = $true
+            $e.SuppressKeyPress = $true
+        }
+    })
+
+    # Prevent closing unless the correct password was entered
+    $form.Add_FormClosing({
+        if ($script:TamperUnlockSuccess -ne $true) {
+            $_.Cancel = $true
+        }
+    })
 
     $label = New-Object System.Windows.Forms.Label
     $label.Text = "TAMPERING DETECTED`n`nADMIN REVIEW REQUIRED`n`nThis system has been locked due to unauthorized modification of OS-Guard.`nOnly an administrator can unlock this session."
@@ -3100,6 +3123,7 @@ function Show-TamperLockoutScreen {
                 } catch {}
                 Start-Sleep -Seconds 1
                 Start-Process "explorer" -ErrorAction SilentlyContinue
+                $script:TamperUnlockSuccess = $true
                 $form.Close()
             } else {
                 [System.Windows.Forms.MessageBox]::Show("Incorrect password. Tamper lockout remains active.", "Access Denied", "OK", "Error") | Out-Null
@@ -3140,7 +3164,26 @@ function Show-TamperLockoutScreen {
         Unregister-ScheduledTask -TaskName "OSGuard-TamperLockout" -Confirm:$false | Out-Null
     }
 
-    # Ensure explorer is restarted even if the form is closed unexpectedly
+    # SAFE LOCK FALLBACK: If the form closed without a successful unlock,
+    # forcibly re-lock the system to prevent a child from exploiting an accidental close.
+    if ($script:TamperUnlockSuccess -ne $true) {
+        Write-Log -Message "Tamper lockout screen closed without unlock. Initiating safe re-lock..." -Type "SECURITY" -Color Red
+        try {
+            Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeTimestamp" -Value "" -Type String -Force -ErrorAction SilentlyContinue
+        } catch {}
+        try { Stop-WindowGuard } catch {}
+        try { Enable-OSLock } catch {}
+        try { Enable-DNSLock } catch {}
+        try {
+            $CurrentSessionId = (Get-Process -Id $PID).SessionId
+            $MyExplorer = Get-Process -Name "explorer" -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $CurrentSessionId }
+            if ($MyExplorer) { Stop-Process -Id $MyExplorer.Id -Force -ErrorAction SilentlyContinue }
+        } catch {}
+        Start-Sleep -Seconds 1
+    }
+
+    # Ensure explorer is running (restarted after unlock or after safe re-lock)
     Start-Process "explorer" -ErrorAction SilentlyContinue
 }
 
@@ -3308,24 +3351,6 @@ function Install-Persistence {
     Register-ScheduledTask -TaskName $Guardian2Name -Action $Guardian2Action -Trigger $Guardian2Trigger -Principal $Guardian2Principal -Force | Out-Null
     Write-Log -Message "Guardian 2 '$Guardian2Name' registered (10-minute heartbeat)." -Type "INFO" -Color Gray
 
-    # 4.2 Child Logon Task: Applies HKCU policies in the child's own session at logon.
-    # Runs as the child user (no elevation) so it writes to the live HKCU hive.
-    $ChildSidValue = Get-ChildSid
-    if ($ChildSidValue) {
-        try {
-            $ChildAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$InstallScript`" -ChildLock -ChildUser `"$ChildUser`""
-            $ChildTrigger = New-ScheduledTaskTrigger -AtLogOn
-            $ChildTrigger.UserId = $ChildUser
-            $ChildPrincipalObj = New-ScheduledTaskPrincipal -UserId $ChildUser -LogonType Interactive -RunLevel Limited
-            Register-ScheduledTask -TaskName $ChildLogonTaskName -Action $ChildAction -Trigger $ChildTrigger -Principal $ChildPrincipalObj -Force | Out-Null
-            Write-Log -Message "Child Logon Task '$ChildLogonTaskName' registered (applies HKCU at child logon)." -Type "SUCCESS" -Color Green
-        } catch {
-            Write-Log -Message "Failed to register child logon task: $_" -Type "WARN" -Color Yellow
-        }
-    } else {
-        Write-Log -Message "Child account not yet created - child logon task will be created on next silent heal." -Type "WARN" -Color Yellow
-    }
-
     # 4.3 Program Guardian: scans and hardens newly installed programs every 10 minutes
     Install-ProgramGuardian
 
@@ -3350,6 +3375,25 @@ function Install-Persistence {
     # 6. Apply ALL locks immediately (DNS + OS + child account)
     Enable-DNSLock
     Enable-OSLock
+
+    # 6.0 Child Logon Task: Applies HKCU policies in the child's own session at logon.
+    # Runs as the child user (no elevation) so it writes to the live HKCU hive.
+    # NOTE: Moved here so the child account is created by Enable-OSLock before we register the task.
+    $ChildSidValue = Get-ChildSid
+    if ($ChildSidValue) {
+        try {
+            $ChildAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$InstallScript`" -ChildLock -ChildUser `"$ChildUser`""
+            $ChildTrigger = New-ScheduledTaskTrigger -AtLogOn
+            $ChildTrigger.UserId = $ChildUser
+            $ChildPrincipalObj = New-ScheduledTaskPrincipal -UserId $ChildUser -LogonType Interactive -RunLevel Limited
+            Register-ScheduledTask -TaskName $ChildLogonTaskName -Action $ChildAction -Trigger $ChildTrigger -Principal $ChildPrincipalObj -Force | Out-Null
+            Write-Log -Message "Child Logon Task '$ChildLogonTaskName' registered (applies HKCU at child logon)." -Type "SUCCESS" -Color Green
+        } catch {
+            Write-Log -Message "Failed to register child logon task: $_" -Type "WARN" -Color Yellow
+        }
+    } else {
+        Write-Log -Message "Child account not available after Enable-OSLock - child logon task will be created on next silent heal." -Type "WARN" -Color Yellow
+    }
 
     # 6.1 Initialize ScreenTime config and watcher if not already present
     if (-not (Test-Path $ScreenTimeConfigFile)) {
