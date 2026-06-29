@@ -2,7 +2,7 @@
 
 <div align="center">
   <div style="border-radius: 16px; overflow: hidden; display: inline-block; border: 2px solid #3b82f6;">
-    <img src="icon/osguard_dnsguard.jpg" alt="OSGuard DNSGuard Logo" width="600" />
+    <img src="icon/osguard_dnsguard.png" alt="OSGuard DNSGuard Logo" width="600" />
   </div>
 </div>
 
