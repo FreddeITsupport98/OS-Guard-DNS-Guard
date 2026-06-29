@@ -43,7 +43,14 @@ param (
     [switch]$TamperLockout,
     [switch]$ApproveChildInstall,
     [switch]$RehardenChildInstall,
-    [string]$ChildUser = "Child"
+    [switch]$HealthCheck,
+    [switch]$WhatIf,
+    [switch]$ExportReport,
+    [switch]$FirstRun,
+    [string]$ChildUser = "Child",
+    [string[]]$ChildUsers = @(),
+    [string]$BrandingOrg = "OS-Guard",
+    [string]$HomeSSID = ""
 )
 
 Set-StrictMode -Version Latest
@@ -95,7 +102,14 @@ if (-not $Principal.IsInRole($Role)) {
             if ($TamperLockout) { $ArgsString += " -TamperLockout" }
             if ($ApproveChildInstall) { $ArgsString += " -ApproveChildInstall" }
             if ($RehardenChildInstall) { $ArgsString += " -RehardenChildInstall" }
+            if ($HealthCheck) { $ArgsString += " -HealthCheck" }
+            if ($WhatIf) { $ArgsString += " -WhatIf" }
+            if ($ExportReport) { $ArgsString += " -ExportReport" }
+            if ($FirstRun) { $ArgsString += " -FirstRun" }
             if ($ChildUser -ne "Child") { $ArgsString += " -ChildUser `"$ChildUser`"" }
+            if ($ChildUsers.Count -gt 0) { $ArgsString += " -ChildUsers `"$($ChildUsers -join ',')`"" }
+            if ($BrandingOrg -ne "OS-Guard") { $ArgsString += " -BrandingOrg `"$BrandingOrg`"" }
+            if ($HomeSSID) { $ArgsString += " -HomeSSID `"$HomeSSID`"" }
 
             $ProcessInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" $ArgsString"
             $ProcessInfo.Verb = "runAs"
@@ -144,6 +158,27 @@ function Write-Log {
     $TimeStamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     try { "[$TimeStamp] [$Type] $Message" | Out-File -FilePath $LogFile -Append -Encoding UTF8 -ErrorAction SilentlyContinue } catch {}
 
+    # Write to Windows Event Log for tamper-resistant auditing
+    if ($Type -in @("SECURITY","ERROR","WARN","AUDIT","ACTION")) {
+        try {
+            $SourceName = "OS-Guard"
+            $LogName = "Application"
+            if (-not [System.Diagnostics.EventLog]::SourceExists($SourceName)) {
+                # Requires elevation to create; silently ignore if not present
+                try { New-EventLog -LogName $LogName -Source $SourceName -ErrorAction Stop } catch {}
+            }
+            $EntryType = switch ($Type) {
+                "SECURITY"  { "Warning" }
+                "ERROR"     { "Error" }
+                "WARN"      { "Warning" }
+                "AUDIT"     { "Information" }
+                "ACTION"    { "Information" }
+                default     { "Information" }
+            }
+            Write-EventLog -LogName $LogName -Source $SourceName -EventId 1001 -EntryType $EntryType -Message "[$script:Branding] $Message" -ErrorAction SilentlyContinue
+        } catch {}
+    }
+
     # Only print to screen if we are NOT running silently in the background
     if (-not $SilentLock) {
         Write-Host "[$Type] $Message" -ForegroundColor $Color
@@ -174,6 +209,36 @@ if (-not $Adapters) { $Adapters = Get-NetAdapter -ErrorAction SilentlyContinue }
 $SidAdmin = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-544")
 $SidSystem = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-18")
 $SidUsers = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-11")
+
+# WhatIf/DryRun support: wrap modifying calls in a preview flag
+$script:WhatIfPreference = $WhatIf.IsPresent
+function Invoke-WhatIf {
+    param([scriptblock]$Action, [string]$Description)
+    if ($script:WhatIfPreference) {
+        Write-Log -Message "[WhatIf] $Description" -Type "WhatIf" -Color Yellow
+    } else {
+        & $Action
+    }
+}
+
+# Branding
+$script:Branding = $BrandingOrg
+
+# Home SSID for geofencing
+$script:HomeSSID = $HomeSSID
+
+# Multi-child support: build effective list
+$script:EffectiveChildUsers = if ($ChildUsers.Count -gt 0) { $ChildUsers } else { @($ChildUser) }
+
+# Canary file path
+$CanaryFile = Join-Path $InstallDir ".osguard.canary"
+$CanaryHashFile = Join-Path $InstallDir ".osguard.canary.sha256"
+
+# Cache for expensive lookups
+$script:CachedChildSid = @{}
+$script:CachedChildProfilePath = @{}
+$script:CacheTimestamp = $null
+
 # Network UI restrictions are USER policies (HKCU)
 $GpoPath = "HKCU:\Software\Policies\Microsoft\Windows\Network Connections"
 
@@ -361,32 +426,65 @@ $ChildHivePolicies = @(
 # ============================================================================
 
 function Get-ChildAccount {
+    param([string]$UserName = $ChildUser)
     # Returns the LocalUser object for the child account, or $null
     try {
-        return (Get-LocalUser -Name $ChildUser -ErrorAction Stop)
+        return (Get-LocalUser -Name $UserName -ErrorAction Stop)
     } catch {
         return $null
     }
 }
 
 function Get-ChildSid {
-    $Acct = Get-ChildAccount
-    if ($Acct) { return $Acct.SID.Value }
-    return $null
+    param([string]$UserName = $ChildUser)
+    # Check cache first
+    if ($script:CachedChildSid.ContainsKey($UserName)) {
+        return $script:CachedChildSid[$UserName]
+    }
+    $Acct = Get-ChildAccount -UserName $UserName
+    $Result = $null
+    if ($Acct) { $Result = $Acct.SID.Value }
+    $script:CachedChildSid[$UserName] = $Result
+    return $Result
 }
 
 function Get-ChildProfilePath {
-    param([string]$ChildSidValue)
-    if (-not $ChildSidValue) { $ChildSidValue = Get-ChildSid }
-    if (-not $ChildSidValue) { return $null }
+    param([string]$UserName = $ChildUser, [string]$ChildSidValue)
+    if ($script:CachedChildProfilePath.ContainsKey($UserName)) {
+        return $script:CachedChildProfilePath[$UserName]
+    }
+    if (-not $ChildSidValue) { $ChildSidValue = Get-ChildSid -UserName $UserName }
+    if (-not $ChildSidValue) { $script:CachedChildProfilePath[$UserName] = $null; return $null }
     try {
         $Profile = Get-CimInstance Win32_UserProfile -ErrorAction Stop | Where-Object { $_.SID -eq $ChildSidValue } | Select-Object -First 1
-        if ($Profile) { return $Profile.LocalPath }
+        if ($Profile) { $script:CachedChildProfilePath[$UserName] = $Profile.LocalPath; return $Profile.LocalPath }
     } catch {}
     # Fallback: assume standard profile location
-    $Guess = "C:\Users\$ChildUser"
-    if (Test-Path $Guess) { return $Guess }
+    $Guess = "C:\Users\$UserName"
+    if (Test-Path $Guess) { $script:CachedChildProfilePath[$UserName] = $Guess; return $Guess }
+    $script:CachedChildProfilePath[$UserName] = $null
     return $null
+}
+
+function Clear-ChildCache {
+    $script:CachedChildSid = @{}
+    $script:CachedChildProfilePath = @{}
+}
+
+# PBKDF2 helpers
+function New-PBKDF2Hash {
+    param([string]$Password, [string]$SaltBase64, [int]$Iterations = 100000)
+    $SaltBytes = [Convert]::FromBase64String($SaltBase64)
+    $Derive = New-Object System.Security.Cryptography.Rfc2898DeriveBytes($Password, $SaltBytes, $Iterations)
+    $HashBytes = $Derive.GetBytes(32)
+    $Derive.Dispose()
+    return [Convert]::ToBase64String($HashBytes)
+}
+
+function Get-PBKDF2Salt {
+    $Salt = [byte[]]::new(32)
+    [System.Security.Cryptography.RandomNumberGenerator]::Fill($Salt)
+    return [Convert]::ToBase64String($Salt)
 }
 
 function New-ChildAccount {
@@ -705,10 +803,11 @@ function Harden-FileACL {
 function Set-ParentPassword {
     <#
         Prompts the admin to set (or change) the Parent Mode password.
-        Stores a salted SHA256 hash in the protected registry key.
+        Stores a PBKDF2 hash (100,000 iterations) in the protected registry key.
     #>
     $PwRegName = "OSGuardParentPasswordHash"
     $SaltRegName = "OSGuardParentPasswordSalt"
+    $IterRegName = "OSGuardParentPasswordIterations"
     Write-Host "`n[SET PARENT MODE PASSWORD]" -ForegroundColor Cyan
     $NewPw = Read-Host "Enter new Parent Mode password" -AsSecureString
     $ConfirmPw = Read-Host "Confirm new Parent Mode password" -AsSecureString
@@ -722,17 +821,13 @@ function Set-ParentPassword {
         Write-Host "[ERROR] Password must be at least 8 characters." -ForegroundColor Red
         return
     }
-    # Generate a 16-byte random salt
-    $Salt = [byte[]]::new(16)
-    [System.Security.Cryptography.RandomNumberGenerator]::Fill($Salt)
-    $SaltStr = [Convert]::ToBase64String($Salt)
-    $Bytes = [System.Text.Encoding]::UTF8.GetBytes($SaltStr + $NewPlain)
-    $Hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash($Bytes)
-    $HashStr = ([System.BitConverter]::ToString($Hash) -replace "-", "").ToLower()
+    $SaltStr = Get-PBKDF2Salt
+    $HashStr = New-PBKDF2Hash -Password $NewPlain -SaltBase64 $SaltStr -Iterations 100000
     try {
         if (-not (Test-Path $IntegrityRegPath)) { New-Item -Path $IntegrityRegPath -Force | Out-Null }
         Set-ItemProperty -Path $IntegrityRegPath -Name $PwRegName -Value $HashStr -Type String -Force -ErrorAction Stop
         Set-ItemProperty -Path $IntegrityRegPath -Name $SaltRegName -Value $SaltStr -Type String -Force -ErrorAction Stop
+        Set-ItemProperty -Path $IntegrityRegPath -Name $IterRegName -Value 100000 -Type DWord -Force -ErrorAction Stop
         # Harden the registry key so only SYSTEM can read the hash
         $RegKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SOFTWARE\Microsoft\Windows\CurrentVersion\WpnPlatform\Settings", [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]::ChangePermissions)
         if ($RegKey) {
@@ -746,7 +841,7 @@ function Set-ParentPassword {
         }
         # Also write a hardened hash file so the child session can verify during tamper lockout
         $HashFile = Join-Path $InstallDir "parent.hash"
-        "$HashStr|$SaltStr" | Set-Content -Path $HashFile -Encoding UTF8 -Force
+        "$HashStr|$SaltStr|100000" | Set-Content -Path $HashFile -Encoding UTF8 -Force
         # Harden hash file ACL: only SYSTEM and Admin have access (child cannot read hash to brute-force)
         $HashAcl = Get-Acl -Path $HashFile
         $HashAcl.SetOwner($SidSystem)
@@ -758,7 +853,7 @@ function Set-ParentPassword {
         $HashAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "ChangePermissions", "None", "None", "Deny")))
         $HashAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "TakeOwnership", "None", "None", "Deny")))
         Set-Acl -Path $HashFile -AclObject $HashAcl -ErrorAction SilentlyContinue
-        Write-Log -Message "Parent Mode salted password hash stored." -Type "SUCCESS" -Color Green
+        Write-Log -Message "Parent Mode PBKDF2 password hash stored (100k iterations)." -Type "SUCCESS" -Color Green
         Write-Host "[SUCCESS] Parent Mode password updated." -ForegroundColor Green
     } catch {
         Write-Log -Message "Failed to store parent password hash: $_" -Type "ERROR" -Color Red
@@ -769,24 +864,25 @@ function Set-ParentPassword {
 function Test-ParentPassword {
     <#
         Prompts for the Parent Mode password and returns $true if correct.
-        Uses the stored salt to compute the hash.
+        Uses the stored PBKDF2 salt to compute the hash.
     #>
     $PwRegName = "OSGuardParentPasswordHash"
     $SaltRegName = "OSGuardParentPasswordSalt"
+    $IterRegName = "OSGuardParentPasswordIterations"
     $StoredHash = $null
     $StoredSalt = $null
+    $StoredIterations = 100000
     try { $StoredHash = (Get-ItemProperty -Path $IntegrityRegPath -Name $PwRegName -ErrorAction Stop).$PwRegName } catch {}
     try { $StoredSalt = (Get-ItemProperty -Path $IntegrityRegPath -Name $SaltRegName -ErrorAction Stop).$SaltRegName } catch {}
+    try { $StoredIterations = (Get-ItemProperty -Path $IntegrityRegPath -Name $IterRegName -ErrorAction Stop).$IterRegName } catch {}
     if (-not $StoredHash -or -not $StoredSalt) {
         Write-Host "[ERROR] No Parent Mode password set. Run 'oslock -SetParentPassword' first." -ForegroundColor Red
         return $false
     }
     $InputPw = Read-Host "Enter Parent Mode password" -AsSecureString
     $InputPlain = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($InputPw))
-    $Bytes = [System.Text.Encoding]::UTF8.GetBytes($StoredSalt + $InputPlain)
-    $InputHash = [System.Security.Cryptography.SHA256]::Create().ComputeHash($Bytes)
-    $InputHashStr = ([System.BitConverter]::ToString($InputHash) -replace "-", "").ToLower()
-    if ($InputHashStr -eq $StoredHash) {
+    $InputHash = New-PBKDF2Hash -Password $InputPlain -SaltBase64 $StoredSalt -Iterations $StoredIterations
+    if ($InputHash -eq $StoredHash) {
         return $true
     } else {
         Write-Host "[ERROR] Incorrect password." -ForegroundColor Red
@@ -806,20 +902,29 @@ $ErrorActionPreference = "Stop"
 $RegPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WpnPlatform\Settings"
 $Hash = $null
 $Salt = $null
+$Iterations = 100000
 try { $Hash = (Get-ItemProperty -Path $RegPath -Name "OSGuardParentPasswordHash" -ErrorAction Stop).OSGuardParentPasswordHash } catch {}
 try { $Salt = (Get-ItemProperty -Path $RegPath -Name "OSGuardParentPasswordSalt" -ErrorAction Stop).OSGuardParentPasswordSalt } catch {}
+try { $Iterations = (Get-ItemProperty -Path $RegPath -Name "OSGuardParentPasswordIterations" -ErrorAction Stop).OSGuardParentPasswordIterations } catch {}
 if (-not $Hash -or -not $Salt) { exit }
 
 Add-Type -AssemblyName Microsoft.VisualBasic -ErrorAction SilentlyContinue
+
+function New-PBKDF2Hash {
+    param([string]$Password, [string]$SaltBase64, [int]$Iterations = 100000)
+    $SaltBytes = [Convert]::FromBase64String($SaltBase64)
+    $Derive = New-Object System.Security.Cryptography.Rfc2898DeriveBytes($Password, $SaltBytes, $Iterations)
+    $HashBytes = $Derive.GetBytes(32)
+    $Derive.Dispose()
+    return [Convert]::ToBase64String($HashBytes)
+}
 
 function Test-GuardPassword {
     param([string]$Prompt)
     $Pw = [Microsoft.VisualBasic.Interaction]::InputBox($Prompt, "Parent Mode Window Guard", "", -1, -1)
     if ([string]::IsNullOrWhiteSpace($Pw)) { return $false }
-    $Bytes = [System.Text.Encoding]::UTF8.GetBytes($Salt + $Pw)
-    $InputHash = [System.Security.Cryptography.SHA256]::Create().ComputeHash($Bytes)
-    $InputHashStr = ([System.BitConverter]::ToString($InputHash) -replace "-", "").ToLower()
-    return ($InputHashStr -eq $Hash)
+    $InputHash = New-PBKDF2Hash -Password $Pw -SaltBase64 $Salt -Iterations $Iterations
+    return ($InputHash -eq $Hash)
 }
 
 $SystemProcs = @("explorer","SearchApp","SearchUI","ShellExperienceHost","TextInputHost","ApplicationFrameHost","sihost","RuntimeBroker","dllhost","StartMenuExperienceHost","SecurityHealthSystray","WpnUserService","Dwm","csrss","lsass","services","smss","wininit","winlogon","fontdrvhost","Memory Compression","System","Registry","Secure System","Idle")
@@ -1428,6 +1533,220 @@ function Exit-ParentMode {
     Write-Host "[LOCKED] System is secured again." -ForegroundColor Green
 }
 
+function Invoke-OSGuardFirewall {
+    <#
+        Creates or removes Windows Firewall rules via netsh advfirewall to block
+        child-specific processes from outbound internet unless whitelisted.
+    #>
+    param([switch]$Enable, [switch]$Disable)
+    $ChildProfilePath = Get-ChildProfilePath
+    if (-not $ChildProfilePath) { return }
+    # Common child game/program directories
+    $ProgramDirs = Get-ChildInstallDirectories
+    $RulePrefix = "OSGuard-BlockOutbound"
+    # Remove old rules first
+    $ExistingRules = netsh advfirewall firewall show rule name=all dir=out | Select-String "^Rule Name:\s+($RulePrefix.*)" | ForEach-Object { ($_ -split "\s+", 3)[2].Trim() }
+    foreach ($Rule in $ExistingRules) {
+        if ($Disable) {
+            try { netsh advfirewall firewall delete rule name="$Rule" | Out-Null } catch {}
+        }
+    }
+    if ($Enable) {
+        foreach ($Dir in $ProgramDirs) {
+            $ExeFiles = Get-ChildItem -Path $Dir -Filter "*.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+            foreach ($Exe in $ExeFiles) {
+                $RuleName = "$RulePrefix-$([System.IO.Path]::GetFileNameWithoutExtension($Exe))"
+                try {
+                    netsh advfirewall firewall add rule name="$RuleName" dir=out action=block program="$Exe" enable=yes | Out-Null
+                    Write-Log -Message "Firewall outbound block added for $Exe" -Type "INFO" -Color Gray
+                } catch {}
+            }
+        }
+        # Also block common child browsers that are not Edge (already disallowed via DisallowRun)
+        $BlockExes = @("chrome.exe","firefox.exe","opera.exe","brave.exe","vivaldi.exe")
+        foreach ($ExeName in $BlockExes) {
+            $RuleName = "$RulePrefix-$ExeName"
+            try { netsh advfirewall firewall add rule name="$RuleName" dir=out action=block program="$ExeName" enable=yes | Out-Null } catch {}
+        }
+    }
+}
+
+function Test-HomeNetwork {
+    <#
+        Returns $true if the PC is connected to the home SSID (or if no HomeSSID is configured).
+        Returns $false if connected to a different network, triggering stricter lockdown.
+    #>
+    if ([string]::IsNullOrWhiteSpace($script:HomeSSID)) { return $true }
+    try {
+        $ConnectedSSID = (netsh wlan show interfaces | Select-String "^\s+SSID\s+:" | ForEach-Object { ($_ -split ":\s+")[1].Trim() } | Select-Object -First 1)
+        if ($ConnectedSSID -and $ConnectedSSID -eq $script:HomeSSID) { return $true }
+    } catch {}
+    return $false
+}
+
+function Invoke-GeofenceLockdown {
+    <#
+        If not on the home network, enforces stricter lockdown by killing browsers and games
+        and temporarily adding extra firewall rules. Called during SilentLock and health check.
+    #>
+    if (Test-HomeNetwork) { return }
+    Write-Log -Message "Geofence: Not connected to home network '$script:HomeSSID'. Enforcing stricter lockdown." -Type "SECURITY" -Color Red
+    # Kill non-Edge browsers and games
+    $BlockList = @("chrome","firefox","opera","brave","vivaldi","steam","epicgameslauncher","origin","uplay")
+    foreach ($ProcName in $BlockList) {
+        Get-Process -Name $ProcName -ErrorAction SilentlyContinue | ForEach-Object {
+            try { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } catch {}
+        }
+    }
+    # Add emergency firewall blocks
+    Invoke-OSGuardFirewall -Enable
+}
+
+function Show-HealthCheck {
+    <#
+        Read-only drift audit. Reports all missing tasks, wrong registry values,
+        missing ACLs, and policy drift without fixing anything. Perfect for MSP audits.
+    #>
+    Write-Host "`n=====================================================" -ForegroundColor Cyan
+    Write-Host " OS-GUARD HEALTH CHECK (READ-ONLY) " -ForegroundColor Cyan
+    Write-Host "=====================================================" -ForegroundColor Cyan
+    $Drift = [System.Collections.Generic.List[string]]::new()
+
+    # Check persistence tasks
+    $Tasks = @($TaskName, $Guardian1Name, $Guardian2Name, $ChildLogonTaskName, $ParentModeWatchName, $ProgramScannerName, $ScreenTimeTaskName)
+    foreach ($T in $Tasks) {
+        if (-not (Get-ScheduledTask -TaskName $T -ErrorAction SilentlyContinue)) {
+            $Drift.Add("MISSING TASK: $T")
+        }
+    }
+    # Check canary
+    if (-not (Test-Canary)) { $Drift.Add("CANARY MISSING OR TAMPERED") }
+    # Check install dir
+    if (-not (Test-Path $InstallDir)) { $Drift.Add("INSTALL DIR MISSING: $InstallDir") }
+    if (-not (Test-Path $InstallScript)) { $Drift.Add("INSTALL SCRIPT MISSING: $InstallScript") }
+    # Check wrapper
+    if (-not (Test-Path $CmdPath)) { $Drift.Add("GLOBAL CLI MISSING: $CmdPath") }
+    # Check PATH
+    $CurrentPath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+    if ($CurrentPath -notlike "*$InstallDir*") { $Drift.Add("PATH MISSING: $InstallDir") }
+    # Check machine policies (sample)
+    $UacLUA = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "EnableLUA" -ErrorAction SilentlyContinue).EnableLUA
+    if ($UacLUA -ne 1) { $Drift.Add("UAC LUA NOT ENFORCED") }
+    $Store = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore" -Name "RemoveWindowsStore" -ErrorAction SilentlyContinue).RemoveWindowsStore
+    if ($Store -ne 1) { $Drift.Add("STORE NOT REMOVED") }
+    # Check child account
+    if (-not (Get-ChildAccount)) { $Drift.Add("CHILD ACCOUNT MISSING: $ChildUser") }
+    # Check geofence
+    if (-not (Test-HomeNetwork)) { $Drift.Add("GEOFENCE: NOT ON HOME NETWORK ($script:HomeSSID)") }
+
+    if ($Drift.Count -eq 0) {
+        Write-Host "  [HEALTHY] No drift detected." -ForegroundColor Green
+    } else {
+        Write-Host "  [DRIFT] $($Drift.Count) issues found:" -ForegroundColor Red
+        foreach ($Item in $Drift) { Write-Host "    - $Item" -ForegroundColor Yellow }
+    }
+    Write-Host "=====================================================" -ForegroundColor Cyan
+    return $Drift
+}
+
+function Export-OSGuardReport {
+    <#
+        Exports a CSV report for admin/MSP review including:
+        lock status, last tamper event, screen time usage, installed programs, policy drift.
+    #>
+    param([string]$OutputPath = (Join-Path $InstallDir "OSGuard_Report.csv"))
+    $Drift = Show-HealthCheck
+    $Tracker = Get-ScreenTimeTracker
+    $Config = Get-ScreenTimeConfig
+    $InstalledPrograms = Get-ChildInstallDirectories
+    $TamperActive = Test-TamperDetected
+    $LastTamper = "N/A"
+    try { $LastTamper = (Get-ItemProperty -Path $IntegrityRegPath -Name $TamperDetectedRegName -ErrorAction SilentlyContinue).$TamperDetectedRegName } catch {}
+
+    $Report = [PSCustomObject]@{
+        Timestamp         = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+        Branding          = $script:Branding
+        ChildUser         = $ChildUser
+        TamperActive      = $TamperActive
+        PolicyDriftCount  = $Drift.Count
+        ScreenTimeEnabled = if ($Config) { $Config.Enabled } else { $false }
+        DailyUsedMin      = if ($Tracker) { [math]::Floor($Tracker.DailySecondsUsed / 60) } else { 0 }
+        BrowserUsedMin    = if ($Tracker) { [math]::Floor($Tracker.BrowserSecondsUsed / 60) } else { 0 }
+        InstalledPrograms = ($InstalledPrograms -join ";")
+        HomeNetwork       = (Test-HomeNetwork)
+    }
+    $Report | Export-Csv -Path $OutputPath -NoTypeInformation -Force -Encoding UTF8
+    Write-Log -Message "Report exported to $OutputPath" -Type "INFO" -Color Gray
+    Write-Host "[INFO] Report exported to $OutputPath" -ForegroundColor Green
+}
+
+function Show-SetupWizard {
+    <#
+        First-Run Wizard: WinForms dialog that asks for child username, daily screen time,
+        weekend limit, then auto-deploys everything. Removes the "read the menu" barrier.
+    #>
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+    Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = "$script:Branding - First Run Wizard"
+    $form.Size = New-Object System.Drawing.Size(500, 420)
+    $form.StartPosition = 'CenterScreen'
+    $form.FormBorderStyle = 'FixedDialog'
+    $form.MaximizeBox = $false
+
+    $y = 20
+    $labels = @(
+        @("Child username:", "Child"),
+        @("Daily start time (HH:mm):", "08:00"),
+        @("Daily end time (HH:mm):", "20:00"),
+        @("Daily max minutes (weekday):", "120"),
+        @("Browser max minutes (weekday):", "60"),
+        @("Weekend daily max minutes:", "180"),
+        @("Weekend browser max minutes:", "90")
+    )
+    $controls = @()
+    foreach ($pair in $labels) {
+        $lbl = New-Object System.Windows.Forms.Label
+        $lbl.Text = $pair[0]
+        $lbl.Location = New-Object System.Drawing.Point(20, $y)
+        $lbl.Size = New-Object System.Drawing.Size(200, 20)
+        $form.Controls.Add($lbl)
+        $txt = New-Object System.Windows.Forms.TextBox
+        $txt.Text = $pair[1]
+        $txt.Location = New-Object System.Drawing.Point(230, $y)
+        $txt.Size = New-Object System.Drawing.Size(220, 20)
+        $form.Controls.Add($txt)
+        $controls += $txt
+        $y += 35
+    }
+
+    $btn = New-Object System.Windows.Forms.Button
+    $btn.Text = "DEPLOY"
+    $btn.Location = New-Object System.Drawing.Point(180, $y + 10)
+    $btn.Size = New-Object System.Drawing.Size(120, 30)
+    $btn.Add_Click({
+        $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
+        $form.Close()
+    })
+    $form.Controls.Add($btn)
+    $form.AcceptButton = $btn
+
+    [void]$form.ShowDialog()
+    if ($form.DialogResult -eq [System.Windows.Forms.DialogResult]::OK) {
+        $ChildUser = $controls[0].Text
+        $DailyStart = $controls[1].Text
+        $DailyEnd = $controls[2].Text
+        $DailyMax = [int]$controls[3].Text
+        $BrowserMax = [int]$controls[4].Text
+        $WeekendDailyMax = [int]$controls[5].Text
+        $WeekendBrowserMax = [int]$controls[6].Text
+        Set-ScreenTimeConfig -DailyStart $DailyStart -DailyEnd $DailyEnd -DailyMaxMinutes $DailyMax -BrowserMaxMinutes $BrowserMax -WeekendDailyMaxMinutes $WeekendDailyMax -WeekendBrowserMaxMinutes $WeekendBrowserMax -Enabled $true
+        Write-Log -Message "First Run Wizard configured for '$ChildUser'. Deploying locks..." -Type "ACTION" -Color Magenta
+        Install-Persistence
+    }
+}
+
 function New-ParentModeShortcut {
     <#
         Creates Parent Mode, Lock Now, and Continue shortcuts on the admin desktop.
@@ -1622,6 +1941,7 @@ function Get-ChildInstallDirectories {
     <#
         Discovers program install directories and shortcuts within the child profile.
         Scans Desktop, Start Menu, AppData\Local\Programs, and AppData\Roaming.
+        Uses [System.IO.Directory]::EnumerateDirectories for performance.
         Returns an array of unique directory paths.
     #>
     $ChildProfilePath = Get-ChildProfilePath
@@ -1641,17 +1961,27 @@ function Get-ChildInstallDirectories {
     foreach ($ScanPath in $ScanPaths) {
         if (-not (Test-Path $ScanPath)) { continue }
         try {
-            # Single shallow scan for .exe, .dll, and .json instead of three separate recursive calls
-            $Candidates = Get-ChildItem -Path $ScanPath -Directory -ErrorAction SilentlyContinue | Where-Object {
-                $Name = $_.Name
+            $Candidates = [System.IO.Directory]::EnumerateDirectories($ScanPath) | Where-Object {
+                $Name = [System.IO.Path]::GetFileName($_)
                 # Skip Windows system folders that are not user-installed programs
                 if ($Name -match "^(Microsoft|Windows|Temp|Packages|Temp\w*|Media\w*)$") { return $false }
                 # Heuristic: contains .exe or .dll files, or looks like a program folder
-                $HasFiles = $null -ne (Get-ChildItem -Path $_.FullName -Include @("*.exe","*.dll","*.json") -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 1)
+                $HasFiles = $false
+                try {
+                    $SubDirs = [System.IO.Directory]::EnumerateDirectories($_, "*", [System.IO.SearchOption]::AllDirectories)
+                    foreach ($SubDir in $SubDirs) {
+                        if ([System.IO.Directory]::GetFiles($SubDir, "*.exe").Count -gt 0 -or
+                            [System.IO.Directory]::GetFiles($SubDir, "*.dll").Count -gt 0 -or
+                            [System.IO.Directory]::GetFiles($SubDir, "*.json").Count -gt 0) {
+                            $HasFiles = $true
+                            break
+                        }
+                    }
+                } catch { $HasFiles = $false }
                 $HasFiles
             }
             foreach ($Candidate in $Candidates) {
-                if (-not $Dirs.Contains($Candidate.FullName)) { $Dirs.Add($Candidate.FullName) }
+                if (-not $Dirs.Contains($Candidate)) { $Dirs.Add($Candidate) }
             }
         } catch {}
     }
@@ -1777,7 +2107,19 @@ function Scan-And-Harden-ChildPrograms {
         Main Program Guardian scan routine.
         Discovers newly installed programs in the child profile and hardens them.
         Also hardens all shortcuts.
+        Skips expensive scan if the child is not currently logged in.
     #>
+    # Performance: skip scan if child is not logged in
+    $ChildIsLoggedIn = $false
+    try {
+        $LoggedOn = Get-CimInstance Win32_LoggedOnUser -ErrorAction SilentlyContinue | Where-Object { $_.Antecedent -match "Name=`"$ChildUser`"" }
+        if ($LoggedOn) { $ChildIsLoggedIn = $true }
+    } catch { $ChildIsLoggedIn = $true }
+    if (-not $ChildIsLoggedIn) {
+        Write-Log -Message "Program Guardian: child '$ChildUser' is not logged in. Skipping scan." -Type "INFO" -Color Gray
+        return
+    }
+
     Write-Log -Message "Program Guardian: scanning child profile for installed programs..." -Type "ACTION" -Color Cyan
 
     $DiscoveredDirs = Get-ChildInstallDirectories
@@ -2938,6 +3280,125 @@ function Show-CategoryGrid {
     try { $TamperFlag = (Get-ItemProperty -Path $IntegrityRegPath -Name $TamperDetectedRegName -ErrorAction Stop).$TamperDetectedRegName -eq 1 } catch {}
     $Categories["Script Tamper Lockout"] = $TamperFlag
 
+    # --- Canary File ---
+    $Categories["Canary File"] = (Test-Canary)
+
+    # --- Task Scheduler Health ---
+    $ScheduleStart = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Schedule" -Name "Start" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "Start" -ErrorAction SilentlyContinue
+    $Categories["Task Scheduler"] = ($ScheduleStart -ne 4)
+
+    # --- Firewall Rules ---
+    $FwRules = $null
+    try { $FwRules = netsh advfirewall firewall show rule name=all dir=out | Select-String "^Rule Name:\s+(OSGuard-BlockOutbound.*)" } catch {}
+    $Categories["Firewall Rules"] = ($null -ne $FwRules -and $FwRules.Count -gt 0)
+
+    # --- Geofencing ---
+    $Categories["Geofencing"] = (Test-HomeNetwork)
+
+    # --- Parent Mode Active ---
+    $ParentModeActive = $false
+    try { $ParentModeActive = (Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -ErrorAction Stop).OSGuardParentModeActive -eq 1 } catch {}
+    $Categories["Parent Mode Active"] = $ParentModeActive
+
+    # --- Child Logon Task ---
+    $Categories["Child Logon Task"] = ($null -ne (Get-ScheduledTask -TaskName $ChildLogonTaskName -ErrorAction SilentlyContinue))
+
+    # --- Parent Mode Watch ---
+    $Categories["Parent Mode Watch"] = ($null -ne (Get-ScheduledTask -TaskName $ParentModeWatchName -ErrorAction SilentlyContinue))
+
+    # --- WMI Subscription ---
+    $WmiFilterExists = Get-WmiObject -Class __EventFilter -Namespace "root\subscription" -Filter "Name='$WmiEventName'" -ErrorAction SilentlyContinue
+    $WmiConsumerExists = Get-WmiObject -Class CommandLineEventConsumer -Namespace "root\subscription" -Filter "Name='$WmiEventName'" -ErrorAction SilentlyContinue
+    $WmiBindingExists = Get-WmiObject -Class __FilterToConsumerBinding -Namespace "root\subscription" -Filter "__PATH LIKE '%$WmiEventName%'" -ErrorAction SilentlyContinue
+    $Categories["WMI Subscription"] = ($null -ne $WmiFilterExists -and $null -ne $WmiConsumerExists -and $null -ne $WmiBindingExists)
+
+    # --- Browser Launcher ---
+    $Categories["Browser Launcher"] = (Test-Path $BrowserLauncherPath)
+
+    # --- Requests Directory ---
+    $Categories["Requests Dir"] = (Test-Path (Join-Path $InstallDir "Requests"))
+
+    # --- Install Directory ---
+    $Categories["Install Dir"] = (Test-Path $InstallDir)
+
+    # --- PATH Entry ---
+    $CurrentPath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+    $Categories["PATH Entry"] = ($CurrentPath -like "*$InstallDir*")
+
+    # --- Edge URL Blocklist ---
+    $EdgeUrlBlock = Test-Path (Join-Path $EdgePath "URLBlocklist")
+    $Categories["Edge URL Block"] = $EdgeUrlBlock
+
+    # --- Edge Extension Blocklist ---
+    $EdgeExtBlock = Test-Path (Join-Path $EdgePath "ExtensionInstallBlocklist")
+    $Categories["Edge Ext Block"] = $EdgeExtBlock
+
+    # --- Chrome DoH ---
+    $ChromeDoH = Get-ItemProperty -Path $ChromePath -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "DnsOverHttpsMode" -ErrorAction SilentlyContinue
+    $Categories["Chrome DoH"] = ($ChromeDoH -eq "off")
+
+    # --- Firefox DoH ---
+    $FirefoxDoH = Get-ItemProperty -Path $FirefoxPath -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "Enabled" -ErrorAction SilentlyContinue
+    $Categories["Firefox DoH"] = ($FirefoxDoH -eq 0)
+
+    # --- Network Change GPO ---
+    $NetChange = Get-ItemProperty -Path $GpoPath -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "NC_LanChangeProperties" -ErrorAction SilentlyContinue
+    $Categories["Net Change GPO"] = ($NetChange -eq 0)
+
+    # --- Advanced TCP/IP GPO ---
+    $NetAdv = Get-ItemProperty -Path $GpoPath -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "NC_AllowAdvancedTCPIPConfig" -ErrorAction SilentlyContinue
+    $Categories["Net Adv GPO"] = ($NetAdv -eq 0)
+
+    # --- Disable Consumer Features ---
+    $ConsumerFeat = Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "DisableWindowsConsumerFeatures" -ErrorAction SilentlyContinue
+    $Categories["Consumer Features"] = ($ConsumerFeat -eq 1)
+
+    # --- Disable Notification Center ---
+    $NotifCenter = Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "DisableNotificationCenter" -ErrorAction SilentlyContinue
+    $Categories["Notification Center"] = ($NotifCenter -eq 1)
+
+    # --- Child Is Standard User ---
+    $ChildIsAdmin = $false
+    try { $ChildIsAdmin = ($null -ne (Get-LocalGroupMember -Group "Administrators" -ErrorAction Stop | Where-Object { $_.Name -match "$ChildUser$" })) } catch {}
+    $Categories["Child Not Admin"] = (-not $ChildIsAdmin)
+
+    # --- Password Change Disabled ---
+    $ChildAcct = $null
+    try { $ChildAcct = Get-LocalUser -Name $ChildUser -ErrorAction Stop } catch {}
+    $Categories["Password Locked"] = ($ChildAcct -and $ChildAcct.PasswordChangeableDate -eq $null)
+
+    # --- Edge Incognito ---
+    $EdgeIncognito = Get-ItemProperty -Path $EdgePath -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "InPrivateModeAvailability" -ErrorAction SilentlyContinue
+    $Categories["Edge Incognito"] = ($EdgeIncognito -eq 1)
+
+    # --- Edge DevTools ---
+    $EdgeDevTools = Get-ItemProperty -Path $EdgePath -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "DeveloperToolsAvailability" -ErrorAction SilentlyContinue
+    $Categories["Edge DevTools"] = ($EdgeDevTools -eq 2)
+
+    # --- Edge Downloads ---
+    $EdgeDownloads = Get-ItemProperty -Path $EdgePath -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "DownloadRestrictions" -ErrorAction SilentlyContinue
+    $Categories["Edge Downloads"] = ($EdgeDownloads -eq 3)
+
+    # --- Edge Sync ---
+    $EdgeSync = Get-ItemProperty -Path $EdgePath -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "SyncDisabled" -ErrorAction SilentlyContinue
+    $Categories["Edge Sync"] = ($EdgeSync -eq 1)
+
+    # --- Edge SafeSearch ---
+    $EdgeSafeSearch = Get-ItemProperty -Path $EdgePath -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "ForceGoogleSafeSearch" -ErrorAction SilentlyContinue
+    $Categories["Edge SafeSearch"] = ($EdgeSafeSearch -eq 1)
+
+    # --- Edge Guest Mode ---
+    $EdgeGuestMode = Get-ItemProperty -Path $EdgePath -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "BrowserGuestModeEnabled" -ErrorAction SilentlyContinue
+    $Categories["Edge Guest Mode"] = ($EdgeGuestMode -eq 0)
+
+    # --- Edge Bookmark Bar ---
+    $EdgeBookmark = Get-ItemProperty -Path $EdgePath -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "BookmarkBarEnabled" -ErrorAction SilentlyContinue
+    $Categories["Edge Bookmark Bar"] = ($EdgeBookmark -eq 0)
+
+    # --- Edge Password Manager ---
+    $EdgePassMgr = Get-ItemProperty -Path $EdgePath -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "PasswordManagerEnabled" -ErrorAction SilentlyContinue
+    $Categories["Edge Password Mgr"] = ($EdgePassMgr -eq 0)
+
     # Print two-column grid
     Write-Host "`n=====================================================" -ForegroundColor DarkGray
     Write-Host " CATEGORY STATUS GRID " -ForegroundColor White
@@ -2980,6 +3441,55 @@ function Test-IntegrityStatus {
     if (-not $ExpectedHash) { return $null }
     $ActualHash = (Get-FileHash -Path $InstallScript -Algorithm SHA256).Hash
     return ($ExpectedHash.Trim() -eq $ActualHash.Trim())
+}
+
+function Test-Canary {
+    <#
+        Checks for the presence and integrity of the canary file.
+        If the canary file is missing or its hash does not match, tampering is detected.
+    #>
+    if (-not (Test-Path $CanaryFile)) { return $false }
+    if (-not (Test-Path $CanaryHashFile)) { return $false }
+    try {
+        $ExpectedHash = (Get-Content -Path $CanaryHashFile -Raw -ErrorAction Stop).Trim()
+        $ActualHash = (Get-FileHash -Path $CanaryFile -Algorithm SHA256).Hash
+        return ($ExpectedHash -eq $ActualHash)
+    } catch { return $false }
+}
+
+function Set-Canary {
+    <#
+        Creates a hidden canary file with random content and stores its hash.
+    #>
+    try {
+        $RandomBytes = [byte[]]::new(64)
+        [System.Security.Cryptography.RandomNumberGenerator]::Fill($RandomBytes)
+        [System.IO.File]::WriteAllBytes($CanaryFile, $RandomBytes)
+        (Get-Item $CanaryFile).Attributes = 'Hidden'
+        $CanaryHash = (Get-FileHash -Path $CanaryFile -Algorithm SHA256).Hash
+        Set-Content -Path $CanaryHashFile -Value $CanaryHash -Encoding UTF8 -Force -ErrorAction Stop
+        # Harden canary files so they can't be tampered with by child
+        Harden-FileACL -FilePath $CanaryFile
+        Harden-FileACL -FilePath $CanaryHashFile
+        Write-Log -Message "Canary file created and hardened." -Type "INFO" -Color Gray
+    } catch {
+        Write-Log -Message "Failed to create canary file: $_" -Type "WARN" -Color Yellow
+    }
+}
+
+function Test-TaskSchedulerTamper {
+    <#
+        Detects if the Task Scheduler (Schedule) service has been tampered with (disabled).
+        Returns $true if tampered, $false otherwise.
+    #>
+    try {
+        $Svc = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Schedule" -Name "Start" -ErrorAction Stop
+        if ($Svc.Start -eq 4) {
+            Write-Log -Message "Task Scheduler service has been disabled (Start=4). Tamper detected!" -Type "SECURITY" -Color Red
+            return $true
+        }
+    } catch {}
+    return $false
 }
 
 function Test-TamperDetected {
@@ -3054,7 +3564,7 @@ function Show-TamperLockoutScreen {
     })
 
     $label = New-Object System.Windows.Forms.Label
-    $label.Text = "TAMPERING DETECTED`n`nADMIN REVIEW REQUIRED`n`nThis system has been locked due to unauthorized modification of OS-Guard.`nOnly an administrator can unlock this session."
+    $label.Text = "TAMPERING DETECTED`n`nADMIN REVIEW REQUIRED`n`n[$script:Branding] This system has been locked due to unauthorized modification.`nOnly an administrator can unlock this session."
     $label.ForeColor = [System.Drawing.Color]::Red
     $label.Font = New-Object System.Drawing.Font("Consolas", 24, [System.Drawing.FontStyle]::Bold)
     $label.AutoSize = $false
@@ -3094,22 +3604,27 @@ function Show-TamperLockoutScreen {
         # Child session cannot read the hardened registry key, so read from the hardened hash file instead
         $HashFile = Join-Path $InstallDir "parent.hash"
         if (Test-Path $HashFile) {
-            $Content = Get-Content -Path $HashFile -Raw -ErrorAction SilentlyContinue
+        $Content = Get-Content -Path $HashFile -Raw -ErrorAction SilentlyContinue
             if ($Content) {
                 $Parts = $Content.Trim() -split '\|'
                 if ($Parts.Count -ge 2) { $StoredHash = $Parts[0]; $StoredSalt = $Parts[1] }
+                if ($Parts.Count -ge 3) { $StoredIterations = [int]$Parts[2] } else { $StoredIterations = 100000 }
             }
         }
         # Fallback to registry if file is missing (admin session)
         if (-not $StoredHash -or -not $StoredSalt) {
             try { $StoredHash = (Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentPasswordHash" -ErrorAction Stop).OSGuardParentPasswordHash } catch {}
             try { $StoredSalt = (Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentPasswordSalt" -ErrorAction Stop).OSGuardParentPasswordSalt } catch {}
+            try { $StoredIterations = (Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentPasswordIterations" -ErrorAction Stop).OSGuardParentPasswordIterations } catch {}
         }
         if ($StoredHash -and $StoredSalt) {
-            $Bytes = [System.Text.Encoding]::UTF8.GetBytes($StoredSalt + $pw)
-            $InputHash = [System.Security.Cryptography.SHA256]::Create().ComputeHash($Bytes)
-            $InputHashStr = ([System.BitConverter]::ToString($InputHash) -replace "-", "").ToLower()
-            if ($InputHashStr -eq $StoredHash) {
+            # Inline PBKDF2 for the lockout screen (self-contained)
+            $SaltBytes = [Convert]::FromBase64String($StoredSalt)
+            $Derive = New-Object System.Security.Cryptography.Rfc2898DeriveBytes($pw, $SaltBytes, $StoredIterations)
+            $HashBytes = $Derive.GetBytes(32)
+            $Derive.Dispose()
+            $InputHash = [Convert]::ToBase64String($HashBytes)
+            if ($InputHash -eq $StoredHash) {
                 Clear-TamperDetected
                 # Clean up the scheduled task that triggered this lockout
                 if (Get-ScheduledTask -TaskName "OSGuard-TamperLockout" -ErrorAction SilentlyContinue) {
@@ -3406,20 +3921,21 @@ function Install-Persistence {
     $DefaultPw = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 12 | ForEach-Object { [char]$_ })
     Write-Host "`n[IMPORTANT] Your default Parent Mode password is: $DefaultPw" -ForegroundColor Yellow
     Write-Host "            Please write it down. You will need it to enter Parent Mode and approve installations." -ForegroundColor Yellow
-    $Salt = [byte[]]::new(16)
-    [System.Security.Cryptography.RandomNumberGenerator]::Fill($Salt)
-    $SaltStr = [Convert]::ToBase64String($Salt)
-    $Bytes = [System.Text.Encoding]::UTF8.GetBytes($SaltStr + $DefaultPw)
-    $Hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash($Bytes)
-    $HashStr = ([System.BitConverter]::ToString($Hash) -replace "-", "").ToLower()
+    $SaltStr = Get-PBKDF2Salt
+    $HashStr = New-PBKDF2Hash -Password $DefaultPw -SaltBase64 $SaltStr -Iterations 100000
     try {
         if (-not (Test-Path $IntegrityRegPath)) { New-Item -Path $IntegrityRegPath -Force | Out-Null }
         Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentPasswordHash" -Value $HashStr -Type String -Force -ErrorAction Stop
         Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentPasswordSalt" -Value $SaltStr -Type String -Force -ErrorAction Stop
+        Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentPasswordIterations" -Value 100000 -Type DWord -Force -ErrorAction Stop
         Write-Log -Message "Default Parent Mode password set (change it with 'oslock -SetParentPassword')." -Type "INFO" -Color Gray
     } catch {
         Write-Log -Message "Failed to set default Parent Mode password: $_" -Type "WARN" -Color Yellow
     }
+
+    # 7.1 Create Canary file for tamper detection
+    Write-Log -Message "Creating canary file for tamper detection..." -Type "INFO" -Color Yellow
+    Set-Canary
     $RequestDir = Join-Path $InstallDir "Requests"
     if (-not (Test-Path $RequestDir)) { New-Item -ItemType Directory -Path $RequestDir -Force -ErrorAction SilentlyContinue | Out-Null }
     try {
@@ -3577,6 +4093,20 @@ function Uninstall-Persistence {
         if (Test-Path $STFile) { Remove-Item -Path $STFile -Force -ErrorAction SilentlyContinue }
     }
 
+    # Remove Canary files
+    foreach ($CFile in @($CanaryFile, $CanaryHashFile)) {
+        if (Test-Path $CFile) { Remove-Item -Path $CFile -Force -ErrorAction SilentlyContinue }
+    }
+
+    # Remove firewall rules
+    Write-Log -Message "Removing OS-Guard firewall rules..." -Type "INFO" -Color Gray
+    try {
+        $FwRules = netsh advfirewall firewall show rule name=all dir=out | Select-String "^Rule Name:\s+(OSGuard-BlockOutbound.*)" | ForEach-Object { ($_ -split "\s+", 3)[2].Trim() }
+        foreach ($Rule in $FwRules) {
+            try { netsh advfirewall firewall delete rule name="$Rule" | Out-Null } catch {}
+        }
+    } catch { Write-Log -Message "Failed to remove firewall rules: $_" -Type "WARN" -Color Yellow }
+
     # Remove the Scheduled Tasks (including guardians, child logon, parent mode watch, program scanner, screen time, tamper lockout, and install re-harden)
     foreach ($TName in @($TaskName, $Guardian1Name, $Guardian2Name, $ChildLogonTaskName, $ParentModeWatchName, $ProgramScannerName, $ScreenTimeTaskName, "OSGuard-TamperLockout", "OSGuard-ApproveInstallReharden")) {
         if (Get-ScheduledTask -TaskName $TName -ErrorAction SilentlyContinue) {
@@ -3599,6 +4129,7 @@ function Uninstall-Persistence {
         Remove-ItemProperty -Path $IntegrityRegPath -Name "OSGuardIntegrity" -ErrorAction SilentlyContinue
         Remove-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentPasswordHash" -ErrorAction SilentlyContinue
         Remove-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentPasswordSalt" -ErrorAction SilentlyContinue
+        Remove-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentPasswordIterations" -ErrorAction SilentlyContinue
         Remove-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -ErrorAction SilentlyContinue
         Remove-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeTimestamp" -ErrorAction SilentlyContinue
         Remove-ItemProperty -Path $IntegrityRegPath -Name $TamperDetectedRegName -ErrorAction SilentlyContinue
@@ -3721,6 +4252,19 @@ if ($SilentLock) {
     $IntegrityFile = Join-Path $InstallDir "integrity.sha256"
     $HashCheckPassed = $true
 
+    # --- Canary check (catches deletion before script hash check) ---
+    if (-not (Test-Canary)) {
+        Write-Log -Message "CANARY FAILURE: Canary file missing or tampered! Tamper lockout activated." -Type "SECURITY" -Color Red
+        Set-TamperDetected
+        $HashCheckPassed = $false
+    }
+
+    # --- Task Scheduler tamper check ---
+    if (Test-TaskSchedulerTamper) {
+        Set-TamperDetected
+        $HashCheckPassed = $false
+    }
+
     # Primary check: registry stored hash
     $ExpectedHash = $null
     try { $ExpectedHash = (Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardIntegrity" -ErrorAction Stop).OSGuardIntegrity } catch {}
@@ -3770,6 +4314,9 @@ if ($SilentLock) {
             $HashCheckPassed = $false
         }
     }
+
+    # Geofence: enforce stricter lockdown if not on home network
+    Invoke-GeofenceLockdown
 
     # Even on integrity failure, re-apply locks to keep the child locked down.
     # Guardian: ensure main task still exists and recreate it if deleted
@@ -3913,6 +4460,10 @@ if ($GrantBrowserTime) { Show-GrantBrowserTimeDialog; return }
 if ($ScreenTimeEnforce) { Invoke-ScreenTimeEnforcement; return }
 if ($ApproveChildInstall) { Approve-ChildInstall; return }
 if ($RehardenChildInstall) { Invoke-ChildInstallReharden; return }
+if ($HealthCheck) { Show-HealthCheck; return }
+if ($WhatIf) { $script:WhatIfPreference = $true; Install-Persistence; return }
+if ($ExportReport) { Export-OSGuardReport; return }
+if ($FirstRun) { Show-SetupWizard; return }
 if ($LockNow)    { Exit-ParentMode; return }
 if ($Uninstall) {
     $CurrentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -3954,11 +4505,14 @@ do {
     Write-Host "[9] SET SCREEN TIME" -ForegroundColor Cyan
     Write-Host "[10] SCREEN TIME STATUS" -ForegroundColor Cyan
     Write-Host "[11] GRANT BROWSER TIME" -ForegroundColor Cyan
-    Write-Host "[12] SET PARENT MODE PASSWORD" -ForegroundColor Green
-    Write-Host "[13] APPROVE CHILD INSTALL (15-min window)" -ForegroundColor Green
+    Write-Host "[14] SET PARENT MODE PASSWORD" -ForegroundColor Green
+    Write-Host "[15] APPROVE CHILD INSTALL (15-min window)" -ForegroundColor Green
+    Write-Host "[16] FIRST RUN WIZARD" -ForegroundColor Green
+    Write-Host "[17] EXPORT REPORT (CSV)" -ForegroundColor Green
+    Write-Host "[18] HEALTH CHECK (DRIFT AUDIT)" -ForegroundColor Green
     Write-Host "-----------------------------------------------------"
 
-    $Choice = Read-Host "Select an administrative action (1-13)"
+    $Choice = Read-Host "Select an administrative action (1-18)"
     $IntegrityStatus = Test-IntegrityStatus
 
     switch ($Choice) {
@@ -4052,6 +4606,23 @@ do {
             } else {
                 Approve-ChildInstall
             }
+            Write-Host "`n[ PRESS ANY KEY TO RETURN TO MENU ]" -ForegroundColor DarkGray; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        }
+        "16" {
+            if ($IntegrityStatus -eq $false) {
+                Write-Host "`n[BLOCKED] Option [16] is disabled because the script has been tampered with." -ForegroundColor Red -BackgroundColor Black
+                Write-Host "Use option [4] to uninstall, then reinstall from a clean source." -ForegroundColor Yellow
+            } else {
+                Show-SetupWizard
+            }
+            Write-Host "`n[ PRESS ANY KEY TO RETURN TO MENU ]" -ForegroundColor DarkGray; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        }
+        "17" {
+            Export-OSGuardReport
+            Write-Host "`n[ PRESS ANY KEY TO RETURN TO MENU ]" -ForegroundColor DarkGray; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        }
+        "18" {
+            Show-HealthCheck
             Write-Host "`n[ PRESS ANY KEY TO RETURN TO MENU ]" -ForegroundColor DarkGray; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
         }
         default { Write-Warning "Invalid Selection."; Start-Sleep -Seconds 1 }

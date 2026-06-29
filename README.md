@@ -82,15 +82,84 @@ Built-in Administrator retains full privileges to install, modify, and unlock.
 | **Game Request Shortcut** | Child has a "Request Game Install" shortcut on the desktop that opens a simple dialog to type a game name and send it to the admin. |
 | **Lock Now / Continue Parent Mode** | Admin desktop shortcuts allow instant re-locking or resetting the AFK timer without opening the terminal. |
 | **Parent Mode AFK Watcher** | 1-minute heartbeat scheduled task monitors idle time; if idle exceeds 5 minutes while parent mode is active, it auto-triggers `oslock -LockNow`. |
-| **Salted Parent Password** | Parent Mode password uses SHA256 with a 16-byte random salt (Base64 stored in `OSGuardParentPasswordSalt`) to resist offline brute-force. Minimum 8 characters. |
+|| **PBKDF2 Password Hash** | Parent Mode password uses `Rfc2898DeriveBytes` with 100,000 iterations and a 32-byte random salt (Base64 stored in `OSGuardParentPasswordSalt`) to resist offline brute-force. Minimum 8 characters. |
 | **Inline Watch Script** | `ParentModeWatch.ps1` is embedded as a Base64 string inside the main script and rewritten fresh on every silent heal; ACL hardened to SYSTEM only. |
 | **Pre-Action Integrity Check** | `Enable-OSLock`, `Disable-OSLock`, and `Enter-ParentMode` re-verify script integrity immediately before executing (not just at menu render time). |
 | **WMI Health Check** | `SilentLock` re-registers the `OSGuardWmiHealth` WMI subscription if the filter, consumer, or binding is missing. |
 | **Task Scheduler Watch** | `SilentLock` monitors the `Schedule` service and auto-starts it if stopped. |
-| **Hardened Requests Directory** | `C:\ProgramData\OSGuard\Requests` grants the child `WriteData, AppendData` only (no read/list/delete); admins retain `ReadAndExecute`. |
-| **Program Guardian Engine** | Scheduled task `OSGuard-ProgramScanner` scans the child profile every 10 minutes for newly installed programs, hardens their directories and shortcuts so the child cannot tamper with them, and blocks 50+ Windows built-in exploit tools via `DisallowRun` registry policies (Notepad, WordPad, Paint, Write, Explorer, PowerShell, pwsh, CMD, WSH, mshta, certutil, bitsadmin, wmic, regsvr32, rundll32, msiexec, msconfig, mmc, eventvwr, UAC bypass tools, taskkill, ftp, curl, robocopy, takeown, icacls, net, schtasks, at, cleanmgr, sdclt, control, .cpl, .msc, and more). Also disables `NoOpenWith`, `NoInternetOpenWith`, `NoSecurityTab`, `NoHardwareTab`, and `NoManageMyComputerVerb`. |
+|| **Hardened Requests Directory** | `C:\ProgramData\OSGuard\Requests` grants the child `WriteData, AppendData` only (no read/list/delete); admins retain `ReadAndExecute`. |
+|| **Canary File Tamper Detection** | A hidden canary file with a known SHA256 hash is created in `$InstallDir`. If it disappears or is modified, tamper lockout triggers immediately before the script hash even runs. |
+|| **Task Scheduler Disablement Detection** | Detects if the `Schedule` service Start value is tampered to `4` (disabled). If so, tamper flag is set immediately. |
+|| **Windows Event Log Logging** | Security/audit events are written to the Windows Application log under source `OS-Guard`, making logs tamper-resistant (child cannot delete Event Log). |
+|| **WhatIf / DryRun Mode** | `-WhatIf` flag previews all registry, file, ACL, and process changes without applying them. Ideal for pre-deployment validation. |
+|| **HealthCheck / Drift Audit** | `-HealthCheck` does a read-only scan of all tasks, registry values, ACLs, canary, and geofence status. Reports drift without fixing anything. |
+|| **Performance Caching** | `Get-ChildSid` and `Get-ChildProfilePath` results are cached in `$script:CachedChildSid` and `$script:CachedChildProfilePath` to avoid repeated WMI/CIM calls in tight loops. |
+|| **Skip Scan When Child Away** | `Scan-And-Harden-ChildPrograms` checks `Win32_LoggedOnUser` first; if the child is not logged in, the expensive recursive filesystem scan is skipped entirely. |
+|| **Multi-Child Support** | `-ChildUsers` accepts an array of usernames (e.g., `@("Child1","Child2")`). The script loops through each child and applies all restrictions. |
+|| **CSV Reporting** | `Export-OSGuardReport` exports lock status, tamper state, screen time usage, installed programs, and policy drift to a CSV for admin/MSP review. |
+|| **White-Label Branding** | `-BrandingOrg "Contoso IT"` customizes the lockout screen text and Event Log entries. |
+|| **Network-Level App Firewall** | `Invoke-OSGuardFirewall` uses `netsh advfirewall` to block outbound internet for child-installed programs and non-Edge browsers. |
+|| **Wi-Fi SSID Geofencing** | `-HomeSSID "MyHomeWiFi"` auto-enables stricter lockdown (browser/game kill + firewall blocks) when the PC is not connected to the home network. |
+|| **First Run Wizard** | `Show-SetupWizard` is a WinForms dialog that asks for child username, daily screen time limits, then auto-deploys. Removes the "read the menu" barrier. |
+|| **Program Guardian Engine** | Scheduled task `OSGuard-ProgramScanner` scans the child profile every 10 minutes for newly installed programs, hardens their directories and shortcuts so the child cannot tamper with them, and blocks 50+ Windows built-in exploit tools via `DisallowRun` registry policies (Notepad, WordPad, Paint, Write, Explorer, PowerShell, pwsh, CMD, WSH, mshta, certutil, bitsadmin, wmic, regsvr32, rundll32, msiexec, msconfig, mmc, eventvwr, UAC bypass tools, taskkill, ftp, curl, robocopy, takeown, icacls, net, schtasks, at, cleanmgr, sdclt, control, .cpl, .msc, and more). Also disables `NoOpenWith`, `NoInternetOpenWith`, `NoSecurityTab`, `NoHardwareTab`, and `NoManageMyComputerVerb`. |
 
 |---
+
+## Architecture Diagram
+
+```mermaid
+flowchart TB
+    subgraph Layer1["Layer 1: DNS & Network Lock"]
+        A1[DNS Registry ACL Locks]
+        A2[DoH Browser Block]
+        A3[Network UI Gray-Out]
+    end
+    subgraph Layer2["Layer 2: OS Child Lockdown"]
+        B1[UAC Max / Store Remove]
+        B2[HKCU Policies via NTUSER.DAT]
+        B3[50+ DisallowRun Exploit Blocks]
+        B4[Edge-Only Browser Lockdown]
+    end
+    subgraph Layer3["Layer 3: Persistence & Self-Healing"]
+        C1[Scheduled Tasks: Boot + Logon + Network]
+        C2[Dual Guardians: 5min + 10min]
+        C3[WMI Subscription: Task Scheduler Watch]
+        C4[Program Guardian: 10min Scan]
+        C5[Screen Time Watcher: 1min]
+        C6[Canary File + Integrity Hash]
+    end
+    subgraph Layer4["Layer 4: Admin Controls"]
+        D1[Parent Mode: Password Unlock]
+        D1b[Window Guard: New-Process Prompt]
+        D2[Screen Time Config]
+        D3[Health Check / Drift Audit]
+        D4[CSV Report Export]
+    end
+
+    Layer1 --> Layer2 --> Layer3 --> Layer4
+```
+
+## Quick Start
+
+### Parent (Home PC)
+1. Open PowerShell as Administrator.
+2. Run: `C:\path\to\new2_OS_lockdown.ps1 -Install`
+3. Write down the 12-character Parent Mode password shown on screen.
+4. Log into the `Child` account. Everything is locked.
+5. To unlock temporarily, switch to your admin account and double-click `Parent Mode` on the desktop, or run `oslock -ParentMode`.
+6. When done, double-click `Lock Now` or run `oslock -LockNow`.
+
+### School IT (Lab Deployment)
+1. Copy the script to a network share or USB.
+2. Run from a SYSTEM shell (e.g., `psexec -s`): `new2_OS_lockdown.ps1 -Install -BrandingOrg "District IT" -ChildUsers @("Student1","Student2")`
+3. Use `oslock -HealthCheck` from any admin machine to audit drift without changing anything.
+4. Use `oslock -ExportReport` to generate a CSV for compliance documentation.
+
+### MSP (Managed Service Provider)
+1. Set a white-label header: `new2_OS_lockdown.ps1 -Install -BrandingOrg "Contoso IT"`
+2. Enable geofencing by setting the home/office SSID: `-HomeSSID "CorpWiFi5G"`
+3. Schedule `oslock -HealthCheck` nightly via your RMM to email the CSV report.
+4. If off-network, stricter lockdown (browser/game kill + firewall block) auto-triggers.
 
 ## Security Architecture
 
@@ -231,7 +300,7 @@ When you run `new2_OS_lockdown.ps1 -Install`, the script performs a systematic, 
 - Computes a SHA256 integrity hash of the installed script and stores it in the registry under `HKLM\SOFTWARE\Microsoft\WpnPlatform\Settings\OSGuardIntegrity` (a misleading key name) and in a backup file under `C:\ProgramData\OSGuard`. The hash is checked before every sensitive action.
 
 **Phase 8 — Parent Mode & Admin Tools**
-- Implements a password-protected `Parent Mode` that temporarily disables the OS lockdown so the administrator can install software, update drivers, or modify settings. Parent Mode is entered via `oslock -ParentMode` and requires a SHA256-salted password (minimum 8 characters) stored in the registry.
+- Implements a password-protected `Parent Mode` that temporarily disables the OS lockdown so the administrator can install software, update drivers, or modify settings. Parent Mode is entered via `oslock -ParentMode` and requires a PBKDF2 password (100,000 iterations, 32-byte salt, minimum 8 characters) stored in the registry.
 - While Parent Mode is active, a background `ParentModeWatch.ps1` process monitors for new visible windows. If a new window appears (e.g., the child uses the admin's mouse), a password prompt is shown immediately. Three wrong passwords trigger instant re-lock.
 - Dynamically creates `Admin CMD.lnk` and `Admin PowerShell.lnk` on the admin desktop during Parent Mode for quick elevated terminal access. These are removed automatically when exiting Parent Mode.
 - Provides `oslock -ContinueParentMode` to reset the AFK timer and `oslock -LockNow` to exit Parent Mode and re-lock immediately without waiting for idle timeout.
@@ -357,6 +426,13 @@ After installation, the global `oslock` command is available from any terminal:
 || `-ScreenTimeStatus` | Show child's current screen time usage | Child (auto) |
 || `-GrantBrowserTime` | Grant temporary browser minutes (password protected) | Admin |
 || `-ScreenTimeEnforce` | Background enforcement used by watcher task | SYSTEM |
+|| `-HealthCheck` | Read-only drift audit of all tasks, registry, ACLs, canary | Admin |
+|| `-WhatIf` | Preview all changes without applying them | Admin |
+|| `-ExportReport` | Export CSV report of status, drift, screen time, programs | Admin |
+|| `-FirstRun` | Launch the First Run Wizard (setup dialog) | Admin |
+|| `-BrandingOrg <name>` | Set white-label branding (default: `OS-Guard`) | Admin |
+|| `-HomeSSID <name>` | Set home Wi-Fi SSID for geofencing | Admin |
+|| `-ChildUsers <array>` | Multi-child support: apply to multiple usernames | Admin |
 
 **Uninstall from a SYSTEM shell:**
 
@@ -525,6 +601,26 @@ Get-ScheduledTask | Where-Object {$_.TaskPath -eq '\' -and $_.Author -notmatch '
 
 ---
 
+## FAQ
+
+**Q: What if my child reboots the PC?**
+A: All locks are registered as scheduled tasks that run at boot and logon. The child reboots into the same locked state.
+
+**Q: How do I change the Parent Mode password?**
+A: Double-click `Set Parent Mode Password` on the admin desktop, or run `oslock -SetParentPassword` from an elevated terminal.
+
+**Q: Can I whitelist a game?**
+A: Enter Parent Mode, then double-click `Approve Child Install` on the admin desktop. This opens a 15-minute window where you can install software into the child account. After 15 minutes, ACLs are automatically re-hardened.
+
+**Q: The script says "TAMPER DETECTED." What should I do?**
+A: Do NOT use Lock/Unlock/Parent Mode options. Use option `[4]` (Uninstall) to remove the script, then reinstall from a clean source. The tamper detection may have been triggered by a Windows Update that changed a protected file. Reinstalling from a clean copy resolves it.
+
+**Q: Can I use this on a laptop that travels?**
+A: Yes. Use the `-HomeSSID` parameter with your home Wi-Fi name. When the laptop is not on that network, stricter lockdown (browser kill + outbound firewall blocks) auto-enforces. When it reconnects to home Wi-Fi, normal rules apply.
+
+**Q: Does the script support multiple children?**
+A: Yes. Use the `-ChildUsers` parameter with an array: `-ChildUsers @("Child1","Child2")`. The script will loop through each child and apply all restrictions.
+
 ## Changelog
 
 See [changelog.md](changelog.md) for a full list of changes, fixes, and security improvements.
@@ -546,6 +642,21 @@ This section tracks upcoming and recently merged changes before they are tagged 
 - **Edge-Only Browser Lockdown** (2026-06-29): `DisallowRun` 51-58 blocks Chrome, Firefox, Brave, Opera, Vivaldi, Waterfox, Tor, and Internet Explorer. Edge deep lockdown disables bookmarks, incognito, dev tools, downloads, sync, password manager, extensions, and settings access.
 - **Screen Time Engine** (2026-06-29): Admin-configurable daily activity hours (`DailyStart`/`DailyEnd`), daily max minutes, and browser-specific max minutes. `OSGuard-ScreenTime` watcher runs every minute as SYSTEM. Browser Request & Grant Flow requires admin password to set session time.
 - **Category Status Grid Bug Fix** (2026-06-29): Fixed `NullArrayIndex` error in `Show-CategoryGrid` caused by `[ordered]@{}` `.Keys` returning a non-indexable collection. Changed `$Keys = $Categories.Keys` to `$Keys = @($Categories.Keys)` to ensure proper array indexing.
+- **PBKDF2 Password Hash** (2026-06-29): Replaced SHA-256 with `Rfc2898DeriveBytes` (100,000 iterations) for parent password storage. Salt size increased from 16 bytes to 32 bytes. Iteration count stored in registry for forward compatibility.
+- **Canary File Tamper Detection** (2026-06-29): Added `.osguard.canary` hidden file with SHA256 hash check. Missing/modified canary triggers tamper lockout before script hash is even verified.
+- **Task Scheduler Disablement Detection** (2026-06-29): Added `Test-TaskSchedulerTamper` to detect if `Schedule` service Start value is tampered to `4` (disabled).
+- **Windows Event Log Logging** (2026-06-29): `Write-Log` now writes SECURITY/ERROR/WARN/AUDIT/ACTION events to the Windows Application log under source `OS-Guard`.
+- **WhatIf / DryRun Mode** (2026-06-29): Added `-WhatIf` parameter that wraps all modifying calls in a preview-only mode.
+- **HealthCheck / Drift Audit** (2026-06-29): Added `-HealthCheck` read-only mode that audits all tasks, registry values, ACLs, canary, and geofence status.
+- **Performance Caching** (2026-06-29): `Get-ChildSid` and `Get-ChildProfilePath` now cache results in script-scoped hashtables to avoid repeated WMI/CIM calls.
+- **Skip Scan When Child Away** (2026-06-29): `Scan-And-Harden-ChildPrograms` now checks `Win32_LoggedOnUser` and skips the expensive recursive scan if the child is not logged in.
+- **Multi-Child Support** (2026-06-29): Added `-ChildUsers` parameter that accepts an array of usernames. Script loops through each child.
+- **CSV Reporting** (2026-06-29): Added `Export-OSGuardReport` function that exports status, drift, screen time, and installed programs to CSV.
+- **White-Label Branding** (2026-06-29): Added `-BrandingOrg` parameter. Customizes lockout screen and Event Log messages.
+- **Network-Level App Firewall** (2026-06-29): Added `Invoke-OSGuardFirewall` using `netsh advfirewall` to block outbound internet for child-installed programs and non-Edge browsers.
+- **Wi-Fi SSID Geofencing** (2026-06-29): Added `-HomeSSID` parameter. When not on the home network, stricter lockdown (browser/game kill + firewall blocks) auto-enforces.
+- **First Run Wizard** (2026-06-29): Added `Show-SetupWizard` WinForms dialog for one-click initial setup (child name, screen time limits, auto-deploy).
+- **README Rewrite** (2026-06-29): Added Mermaid architecture diagram, Quick Start for 3 personas (Parent, School IT, MSP), and FAQ section.
 
 ---
 
