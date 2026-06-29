@@ -545,6 +545,7 @@ This section tracks upcoming and recently merged changes before they are tagged 
 - **WMI subscription** renamed to `OSGuardWmiHealth`.
 - **Edge-Only Browser Lockdown** (2026-06-29): `DisallowRun` 51-58 blocks Chrome, Firefox, Brave, Opera, Vivaldi, Waterfox, Tor, and Internet Explorer. Edge deep lockdown disables bookmarks, incognito, dev tools, downloads, sync, password manager, extensions, and settings access.
 - **Screen Time Engine** (2026-06-29): Admin-configurable daily activity hours (`DailyStart`/`DailyEnd`), daily max minutes, and browser-specific max minutes. `OSGuard-ScreenTime` watcher runs every minute as SYSTEM. Browser Request & Grant Flow requires admin password to set session time.
+- **Category Status Grid Bug Fix** (2026-06-29): Fixed `NullArrayIndex` error in `Show-CategoryGrid` caused by `[ordered]@{}` `.Keys` returning a non-indexable collection. Changed `$Keys = $Categories.Keys` to `$Keys = @($Categories.Keys)` to ensure proper array indexing.
 
 ---
 

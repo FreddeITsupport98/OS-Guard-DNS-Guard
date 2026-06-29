@@ -40,6 +40,7 @@ param (
     [switch]$ScreenTimeStatus,
     [switch]$GrantBrowserTime,
     [switch]$ScreenTimeEnforce,
+    [switch]$TamperLockout,
     [string]$ChildUser = "Child"
 )
 
@@ -51,7 +52,7 @@ param (
 $Principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 $Role = [Security.Principal.WindowsBuiltInRole]::Administrator
 if (-not $Principal.IsInRole($Role)) {
-    if ($Install -or $Uninstall -or $Lock -or $Unlock -or $SilentLock -or $ParentMode -or $SetParentPassword -or $LockNow) {
+    if ($Install -or $Uninstall -or $Lock -or $Unlock -or $SilentLock -or $ParentMode -or $SetParentPassword -or $LockNow -or $ProgramScan -or $SetScreenTime -or $ScreenTimeStatus -or $GrantBrowserTime -or $ScreenTimeEnforce -or $TamperLockout) {
         Write-Warning "CRITICAL: Administrative privileges required for CLI commands. Access Denied."
         return
     }
@@ -81,6 +82,7 @@ if (-not $Principal.IsInRole($Role)) {
             if ($ScreenTimeStatus) { $ArgsString += " -ScreenTimeStatus" }
             if ($GrantBrowserTime) { $ArgsString += " -GrantBrowserTime" }
             if ($ScreenTimeEnforce) { $ArgsString += " -ScreenTimeEnforce" }
+            if ($TamperLockout) { $ArgsString += " -TamperLockout" }
             if ($ChildUser -ne "Child") { $ArgsString += " -ChildUser `"$ChildUser`"" }
 
             $ProcessInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" $ArgsString"
@@ -114,6 +116,7 @@ $ScreenTimeConfigFile = Join-Path $InstallDir "ScreenTime.json"
 $ScreenTimeTrackerFile = Join-Path $InstallDir "ScreenTimeTracker.json"
 $BrowserLauncherPath = Join-Path $InstallDir "BrowserLauncher.ps1"
 $IntegrityRegPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WpnPlatform\Settings"
+$TamperDetectedRegName = "OSGuardTamperDetected"
 
 # Parent Mode AFK Watch script embedded as Base64 (written fresh at install and every silent heal)
 $ParentModeWatchB64 = "JFJlZ1BhdGggPSAiSEtMTTpcU09GVFdBUkVcTWljcm9zb2Z0XFdpbmRvd3NcQ3VycmVudFZlcnNpb25cV3BuUGxhdGZvcm1cU2V0dGluZ3MiCiRBY3RpdmUgPSAoR2V0LUl0ZW1Qcm9wZXJ0eSAtUGF0aCAkUmVnUGF0aCAtTmFtZSAiT1NHdWFyZFBhcmVudE1vZGVBY3RpdmUiIC1FcnJvckFjdGlvbiBTaWxlbnRseUNvbnRpbnVlKS5PU0d1YXJkUGFyZW50TW9kZUFjdGl2ZQppZiAoJEFjdGl2ZSAtbmUgMSkgeyByZXR1cm4gfQoKQWRkLVR5cGUgQCIKdXNpbmcgU3lzdGVtOwp1c2luZyBTeXN0ZW0uUnVudGltZS5JbnRlcm9wU2VydmljZXM7CnB1YmxpYyBjbGFzcyBJZGxlVGltZSB7CiAgICBbRGxsSW1wb3J0KCJ1c2VyMzIuZGxsIildIHN0YXRpYyBleHRlcm4gYm9vbCBHZXRMYXN0SW5wdXRJbmZvKHJlZiBMQVNUSU5QVVRJTkZPIHBsaWkpOwogICAgW1N0cnVjdExheW91dChMYXlvdXRLaW5kLlNlcXVlbnRpYWwpXSBzdHJ1Y3QgTEFTVElOUFVUSU5GTyB7IHB1YmxpYyB1aW50IGNiU2l6ZTsgcHVibGljIHVpbnQgZHdUaW1lOyB9CiAgICBwdWJsaWMgc3RhdGljIHVpbnQgR2V0SWRsZVRpbWUoKSB7CiAgICAgICAgTEFTVElOUFVUSU5GTyBsaWkgPSBuZXcgTEFTVElOUFVUSU5GTygpOyBsaWkuY2JTaXplID0gKHVpbnQpTWFyc2hhbC5TaXplT2YodHlwZW9mKExBU1RJTlBVVElORk8pKTsKICAgICAgICBHZXRMYXN0SW5wdXRJbmZvKHJlZiBsaWkpOwogICAgICAgIHJldHVybiAodWludClFbnZpcm9ubWVudC5UaWNrQ291bnQgLSBsaWkuZHdUaW1lOwogICAgfQp9CiJACgokSWRsZU1zID0gW0lkbGVUaW1lXTo6R2V0SWRsZVRpbWUoKQokVGltZW91dCA9IDUgKiA2MCAqIDEwMDAKaWYgKCRJZGxlTXMgLWd0ICRUaW1lb3V0KSB7CiAgICAmICJDOlxXaW5kb3dzXG9zbG9jay5jbWQiIC1Mb2NrTm93Cn0="
@@ -728,6 +731,10 @@ function Set-ParentPassword {
             $RegKey.SetAccessControl($Acl)
             $RegKey.Close()
         }
+        # Also write a hardened hash file so the child session can verify during tamper lockout
+        $HashFile = Join-Path $InstallDir "parent.hash"
+        "$HashStr|$SaltStr" | Set-Content -Path $HashFile -Encoding UTF8 -Force
+        Harden-FileACL -FilePath $HashFile
         Write-Log -Message "Parent Mode salted password hash stored." -Type "SUCCESS" -Color Green
         Write-Host "[SUCCESS] Parent Mode password updated." -ForegroundColor Green
     } catch {
@@ -997,12 +1004,16 @@ function Test-ScreenTimeLimit {
 
 function Invoke-ScreenTimeEnforcement {
     $Exceeded = Test-ScreenTimeLimit
-    $EdgeProcs = Get-Process -Name "msedge" -ErrorAction SilentlyContinue
-    if ($Exceeded -and $EdgeProcs) {
-        foreach ($Proc in $EdgeProcs) {
+    $BrowserProcs = @()
+    foreach ($BrowserName in @("msedge", "chrome", "firefox")) {
+        $Procs = Get-Process -Name $BrowserName -ErrorAction SilentlyContinue
+        if ($Procs) { $BrowserProcs += $Procs }
+    }
+    if ($Exceeded -and $BrowserProcs) {
+        foreach ($Proc in $BrowserProcs) {
             try { Stop-Process -Id $Proc.Id -Force -ErrorAction Stop } catch {}
         }
-        Write-Log -Message "ScreenTime limit exceeded. Edge terminated." -Type "SECURITY" -Color Red
+        Write-Log -Message "ScreenTime limit exceeded. Browsers terminated." -Type "SECURITY" -Color Red
         try {
             Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
             [System.Windows.Forms.MessageBox]::Show("Your browser time is up or outside allowed hours. Please ask your admin for more time.", "Browser Time Limit", "OK", "Warning") | Out-Null
@@ -1010,7 +1021,7 @@ function Invoke-ScreenTimeEnforcement {
     }
     $Tracker = Get-ScreenTimeTracker
     if (-not $Tracker) { return }
-    if ($EdgeProcs) {
+    if ($BrowserProcs) {
         $Tracker.DailySecondsUsed += 60
         $Tracker.BrowserSecondsUsed += 60
         Update-ScreenTimeTracker -Tracker $Tracker
@@ -1841,7 +1852,10 @@ function Enable-OSLock {
 
     Set-ChildLogoutShortcut
     New-ChildGameRequestShortcut
-    New-ParentModeShortcut
+    # Skip re-creating Parent Mode shortcuts if Parent Mode is currently active
+    $ParentModeActive = $false
+    try { $ParentModeActive = (Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -ErrorAction SilentlyContinue).OSGuardParentModeActive -eq 1 } catch {}
+    if (-not $ParentModeActive) { New-ParentModeShortcut }
     New-BrowserLauncher
     New-BrowserRequestShortcut
     New-GrantBrowserTimeShortcut
@@ -1898,6 +1912,12 @@ function Disable-OSLock {
 
     # 1. Remove machine-wide policies
     Remove-MachinePolicies
+
+    # Clear Parent Mode flags so the AFK watcher doesn't trigger after unlock
+    try {
+        Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeTimestamp" -Value "" -Type String -Force -ErrorAction SilentlyContinue
+    } catch {}
 
     # 2. Remove per-user policies from the child's live and offline hives
     $ChildSidValue = Get-ChildSid
@@ -2378,6 +2398,7 @@ function Get-LockStatus {
     Write-Host "`n=====================================================" -ForegroundColor DarkGray
     Write-Host " INTEGRITY CHECK " -ForegroundColor White
     Write-Host "=====================================================" -ForegroundColor DarkGray
+    $TamperFlag = $false
     if (Test-Path $InstallScript) {
         $ExpectedHash = $null
         try { $ExpectedHash = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WpnPlatform\Settings" -Name "OSGuardIntegrity" -ErrorAction Stop).OSGuardIntegrity } catch {}
@@ -2394,6 +2415,7 @@ function Get-LockStatus {
                 Write-Host "  - Run a full antivirus scan immediately." -ForegroundColor Yellow
                 Write-Host "  - Do NOT use options [1], [2], or [3] (they may run malicious code)." -ForegroundColor Yellow
                 Write-Host "  - Use option [4] to uninstall, then reinstall from a clean source." -ForegroundColor Yellow
+                $TamperFlag = $true
             }
         } else {
             Write-Host "  [ ] Script Integrity    -> NO BASELINE" -ForegroundColor DarkGray
@@ -2403,8 +2425,25 @@ function Get-LockStatus {
     }
     Write-Host "-----------------------------------------------------" -ForegroundColor DarkGray
 
+    # --- 5.1 TAMPER LOCKOUT STATUS ---
+    Write-Host "`n=====================================================" -ForegroundColor DarkGray
+    Write-Host " SCRIPT TAMPER DETECTION " -ForegroundColor White
+    Write-Host "=====================================================" -ForegroundColor DarkGray
+    $TamperLockoutActive = $false
+    try { $TamperLockoutActive = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WpnPlatform\Settings" -Name $TamperDetectedRegName -ErrorAction Stop).$TamperDetectedRegName -eq 1 } catch {}
+    if ($TamperLockoutActive) {
+        Write-Host "  [X] Tamper Lockout      -> ACTIVE (Child session locked)" -ForegroundColor Red
+        Write-Host "  >>> Child session is locked due to script tampering. <<<" -ForegroundColor Black -BackgroundColor Red
+        Write-Host "  Admin password required to unlock the child session." -ForegroundColor Yellow
+    } else {
+        Write-Host "  [ ] Tamper Lockout      -> NOT ACTIVE" -ForegroundColor Green
+    }
+    Write-Host "-----------------------------------------------------" -ForegroundColor DarkGray
+
     # Master Status Banner Logic
-    if ($DnsLocked -and $OsLocked -and $GpoEnforced) {
+    if ($TamperLockoutActive) {
+        Write-Host " >>> TAMPER LOCKOUT ACTIVE: CHILD SESSION LOCKED <<< " -ForegroundColor White -BackgroundColor DarkRed
+    } elseif ($DnsLocked -and $OsLocked -and $GpoEnforced) {
         Write-Host " >>> SYSTEM FULLY LOCKED: DNS + OS CHILD PADLOCK ACTIVE <<< " -ForegroundColor White -BackgroundColor DarkRed
     } elseif ($AnyDnsLocked -or $GpoEnforced -or $OsLocked) {
         Write-Host " >>> SYSTEM PARTIALLY LOCKED: MIXED STATE <<< " -ForegroundColor Black -BackgroundColor Yellow
@@ -2536,6 +2575,9 @@ function Show-CategoryGrid {
         $Categories["Password Change"] = ($NoPassChange -eq 1)
         $Categories["Network UI"] = ($NoNetUi -eq 0)
         $Categories["This PC Hidden"] = ($NoThisPC -eq 1)
+        $DisallowRun = (Get-ItemProperty -Path "Registry::HKEY_USERS\$HiveMount\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Name "DisallowRun" -ErrorAction SilentlyContinue).DisallowRun
+        $ChromeDisallowed = (Get-ItemProperty -Path "Registry::HKEY_USERS\$HiveMount\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun" -Name "51" -ErrorAction SilentlyContinue)."51"
+        $Categories["Alt Browser Block"] = ($DisallowRun -eq 1 -and $ChromeDisallowed -eq "chrome.exe")
 
         [System.GC]::Collect(); [System.GC]::WaitForPendingFinalizers(); Start-Sleep -Milliseconds 300
         reg.exe unload "HKU\OSGuardChildPolicy" 2>&1 | Out-Null
@@ -2555,7 +2597,27 @@ function Show-CategoryGrid {
         $Categories["Password Change"] = $null
         $Categories["Network UI"] = $null
         $Categories["This PC Hidden"] = $null
+        $Categories["Alt Browser Block"] = $null
     }
+
+    # --- Browser Lockdown (Edge-Only) ---
+    $EdgePolicyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"
+    $EdgeGuest = (Get-ItemProperty -Path $EdgePolicyPath -Name "BrowserGuestModeEnabled" -ErrorAction SilentlyContinue).BrowserGuestModeEnabled
+    $EdgeAddProfile = (Get-ItemProperty -Path $EdgePolicyPath -Name "BrowserAddProfileEnabled" -ErrorAction SilentlyContinue).BrowserAddProfileEnabled
+    $Categories["Edge-Only Browser"] = ($EdgeGuest -eq 0 -and $EdgeAddProfile -eq 0)
+
+    # --- Screen Time ---
+    $ScreenTimeEnabled = $false
+    $ScreenTimeTask = Get-ScheduledTask -TaskName $ScreenTimeTaskName -ErrorAction SilentlyContinue
+    if (Test-Path $ScreenTimeConfigFile) {
+        $STConfig = Get-ScreenTimeConfig
+        if ($STConfig -and $STConfig.Enabled) { $ScreenTimeEnabled = $true }
+    }
+    $Categories["Screen Time"] = ($ScreenTimeEnabled -and $null -ne $ScreenTimeTask)
+
+    # --- Program Guardian ---
+    $ProgGuard = Get-ScheduledTask -TaskName $ProgramScannerName -ErrorAction SilentlyContinue
+    $Categories["Program Guardian"] = ($null -ne $ProgGuard)
 
     # --- Logout Shortcut ---
     $ChildProfilePath = $null
@@ -2584,11 +2646,16 @@ function Show-CategoryGrid {
     }
     $Categories["Integrity"] = $IntegrityOk
 
+    # --- Script Tamper Lockout ---
+    $TamperFlag = $false
+    try { $TamperFlag = (Get-ItemProperty -Path $IntegrityRegPath -Name $TamperDetectedRegName -ErrorAction Stop).$TamperDetectedRegName -eq 1 } catch {}
+    $Categories["Script Tamper Lockout"] = $TamperFlag
+
     # Print two-column grid
     Write-Host "`n=====================================================" -ForegroundColor DarkGray
     Write-Host " CATEGORY STATUS GRID " -ForegroundColor White
     Write-Host "=====================================================" -ForegroundColor DarkGray
-    $Keys = $Categories.Keys
+    $Keys = @($Categories.Keys)
     $i = 0
     while ($i -lt $Keys.Count) {
         $LeftKey = $Keys[$i]
@@ -2626,6 +2693,168 @@ function Test-IntegrityStatus {
     if (-not $ExpectedHash) { return $null }
     $ActualHash = (Get-FileHash -Path $InstallScript -Algorithm SHA256).Hash
     return ($ExpectedHash.Trim() -eq $ActualHash.Trim())
+}
+
+function Test-TamperDetected {
+    try {
+        return (Get-ItemProperty -Path $IntegrityRegPath -Name $TamperDetectedRegName -ErrorAction Stop).$TamperDetectedRegName -eq 1
+    } catch { return $false }
+}
+
+function Set-TamperDetected {
+    try {
+        Set-ItemProperty -Path $IntegrityRegPath -Name $TamperDetectedRegName -Value 1 -Type DWord -Force -ErrorAction Stop
+        Write-Log -Message "Tamper detected flag SET in registry." -Type "SECURITY" -Color Red
+    } catch {
+        Write-Log -Message "Failed to set tamper detected flag: $_" -Type "ERROR" -Color Red
+    }
+}
+
+function Clear-TamperDetected {
+    try {
+        Set-ItemProperty -Path $IntegrityRegPath -Name $TamperDetectedRegName -Value 0 -Type DWord -Force -ErrorAction Stop
+        Write-Log -Message "Tamper detected flag CLEARED." -Type "SUCCESS" -Color Green
+    } catch {
+        Write-Log -Message "Failed to clear tamper detected flag: $_" -Type "ERROR" -Color Red
+    }
+}
+
+function Show-TamperLockoutScreen {
+    <#
+        Full-screen lockout that appears when tampering is detected.
+        Kills explorer to hide the taskbar, shows a single always-on-top window
+        with a red warning. Admin must enter the Parent Mode password to unlock.
+        Also provides a button to view the last 50 log lines.
+    #>
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+    Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
+
+    # Hide taskbar / desktop by killing explorer for the current session only
+    try {
+        $CurrentSessionId = (Get-Process -Id $PID).SessionId
+        $MyExplorer = Get-Process -Name "explorer" -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $CurrentSessionId }
+        if ($MyExplorer) { Stop-Process -Id $MyExplorer.Id -Force -ErrorAction SilentlyContinue }
+    } catch {}
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.WindowState = 'Maximized'
+    $form.FormBorderStyle = 'None'
+    $form.TopMost = $true
+    $form.BackColor = [System.Drawing.Color]::Black
+    $form.StartPosition = 'CenterScreen'
+
+    $label = New-Object System.Windows.Forms.Label
+    $label.Text = "TAMPERING DETECTED`n`nADMIN REVIEW REQUIRED`n`nThis system has been locked due to unauthorized modification of OS-Guard.`nOnly an administrator can unlock this session."
+    $label.ForeColor = [System.Drawing.Color]::Red
+    $label.Font = New-Object System.Drawing.Font("Consolas", 24, [System.Drawing.FontStyle]::Bold)
+    $label.AutoSize = $false
+    $label.TextAlign = 'MiddleCenter'
+    $label.Dock = 'Fill'
+    $form.Controls.Add($label)
+
+    $pwPanel = New-Object System.Windows.Forms.Panel
+    $pwPanel.Dock = 'Bottom'
+    $pwPanel.Height = 120
+    $pwPanel.BackColor = [System.Drawing.Color]::DarkRed
+
+    $pwLabel = New-Object System.Windows.Forms.Label
+    $pwLabel.Text = "Admin Password:"
+    $pwLabel.ForeColor = [System.Drawing.Color]::White
+    $pwLabel.Font = New-Object System.Drawing.Font("Consolas", 16)
+    $pwLabel.AutoSize = $true
+    $pwLabel.Location = New-Object System.Drawing.Point(50, 30)
+
+    $pwBox = New-Object System.Windows.Forms.TextBox
+    $pwBox.PasswordChar = '*'
+    $pwBox.Font = New-Object System.Drawing.Font("Consolas", 16)
+    $pwBox.Width = 350
+    $pwBox.Location = New-Object System.Drawing.Point(300, 28)
+
+    $unlockBtn = New-Object System.Windows.Forms.Button
+    $unlockBtn.Text = "UNLOCK"
+    $unlockBtn.Font = New-Object System.Drawing.Font("Consolas", 16, [System.Drawing.FontStyle]::Bold)
+    $unlockBtn.BackColor = [System.Drawing.Color]::Black
+    $unlockBtn.ForeColor = [System.Drawing.Color]::Red
+    $unlockBtn.Size = New-Object System.Drawing.Size(150, 40)
+    $unlockBtn.Location = New-Object System.Drawing.Point(680, 25)
+    $unlockBtn.Add_Click({
+        $pw = $pwBox.Text
+        $StoredHash = $null
+        $StoredSalt = $null
+        # Child session cannot read the hardened registry key, so read from the hardened hash file instead
+        $HashFile = Join-Path $InstallDir "parent.hash"
+        if (Test-Path $HashFile) {
+            $Content = Get-Content -Path $HashFile -Raw -ErrorAction SilentlyContinue
+            if ($Content) {
+                $Parts = $Content.Trim() -split '\|'
+                if ($Parts.Count -ge 2) { $StoredHash = $Parts[0]; $StoredSalt = $Parts[1] }
+            }
+        }
+        # Fallback to registry if file is missing (admin session)
+        if (-not $StoredHash -or -not $StoredSalt) {
+            try { $StoredHash = (Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentPasswordHash" -ErrorAction Stop).OSGuardParentPasswordHash } catch {}
+            try { $StoredSalt = (Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentPasswordSalt" -ErrorAction Stop).OSGuardParentPasswordSalt } catch {}
+        }
+        if ($StoredHash -and $StoredSalt) {
+            $Bytes = [System.Text.Encoding]::UTF8.GetBytes($StoredSalt + $pw)
+            $InputHash = [System.Security.Cryptography.SHA256]::Create().ComputeHash($Bytes)
+            $InputHashStr = ([System.BitConverter]::ToString($InputHash) -replace "-", "").ToLower()
+            if ($InputHashStr -eq $StoredHash) {
+                Clear-TamperDetected
+                # Clean up the scheduled task that triggered this lockout
+                if (Get-ScheduledTask -TaskName "OSGuard-TamperLockout" -ErrorAction SilentlyContinue) {
+                    Unregister-ScheduledTask -TaskName "OSGuard-TamperLockout" -Confirm:$false | Out-Null
+                }
+                [System.Windows.Forms.MessageBox]::Show("Tamper lockout cleared. Restarting Windows UI...", "Unlocked", "OK", "Information") | Out-Null
+                try {
+                    $CurrentSessionId = (Get-Process -Id $PID).SessionId
+                    $MyExplorer = Get-Process -Name "explorer" -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $CurrentSessionId }
+                    if ($MyExplorer) { Stop-Process -Id $MyExplorer.Id -Force -ErrorAction SilentlyContinue }
+                } catch {}
+                Start-Sleep -Seconds 1
+                Start-Process "explorer" -ErrorAction SilentlyContinue
+                $form.Close()
+            } else {
+                [System.Windows.Forms.MessageBox]::Show("Incorrect password. Tamper lockout remains active.", "Access Denied", "OK", "Error") | Out-Null
+            }
+        } else {
+            [System.Windows.Forms.MessageBox]::Show("No admin password configured. Unlock from admin account using 'oslock -ParentMode'.", "Access Denied", "OK", "Error") | Out-Null
+        }
+    })
+
+    $logsBtn = New-Object System.Windows.Forms.Button
+    $logsBtn.Text = "VIEW LOGS"
+    $logsBtn.Font = New-Object System.Drawing.Font("Consolas", 16)
+    $logsBtn.BackColor = [System.Drawing.Color]::Black
+    $logsBtn.ForeColor = [System.Drawing.Color]::White
+    $logsBtn.Size = New-Object System.Drawing.Size(150, 40)
+    $logsBtn.Location = New-Object System.Drawing.Point(850, 25)
+    $logsBtn.Add_Click({
+        if (Test-Path $LogFile) {
+            $logs = Get-Content -Path $LogFile -Tail 50 -Raw
+            [System.Windows.Forms.MessageBox]::Show($logs, "OS-Guard Logs (Last 50 Lines)", "OK", "Information") | Out-Null
+        } else {
+            [System.Windows.Forms.MessageBox]::Show("No log file found at $LogFile", "Logs", "OK", "Warning") | Out-Null
+        }
+    })
+
+    $pwPanel.Controls.Add($pwLabel)
+    $pwPanel.Controls.Add($pwBox)
+    $pwPanel.Controls.Add($unlockBtn)
+    $pwPanel.Controls.Add($logsBtn)
+    $form.Controls.Add($pwPanel)
+
+    $form.Add_Shown({ $form.Activate(); $form.TopMost = $true })
+
+    [void]$form.ShowDialog()
+
+    # Clean up the temporary scheduled task that triggered this lockout
+    if (Get-ScheduledTask -TaskName "OSGuard-TamperLockout" -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName "OSGuard-TamperLockout" -Confirm:$false | Out-Null
+    }
+
+    # Ensure explorer is restarted even if the form is closed unexpectedly
+    Start-Process "explorer" -ErrorAction SilentlyContinue
 }
 
 # ============================================================================
@@ -2983,6 +3212,8 @@ function Invoke-AsSystem {
         Remove-Item -Path $TempScript -Force -ErrorAction SilentlyContinue
     } catch {
         Write-Log -Message "SYSTEM helper task failed: $_" -Type "ERROR" -Color Red
+        Remove-Item -Path $ResultFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path $TempScript -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -3012,8 +3243,8 @@ function Uninstall-Persistence {
         if (Test-Path $STFile) { Remove-Item -Path $STFile -Force -ErrorAction SilentlyContinue }
     }
 
-    # Remove the Scheduled Tasks (including guardians, child logon, parent mode watch, program scanner, and screen time)
-    foreach ($TName in @($TaskName, $Guardian1Name, $Guardian2Name, $ChildLogonTaskName, $ParentModeWatchName, $ProgramScannerName, $ScreenTimeTaskName)) {
+    # Remove the Scheduled Tasks (including guardians, child logon, parent mode watch, program scanner, screen time, and tamper lockout)
+    foreach ($TName in @($TaskName, $Guardian1Name, $Guardian2Name, $ChildLogonTaskName, $ParentModeWatchName, $ProgramScannerName, $ScreenTimeTaskName, "OSGuard-TamperLockout")) {
         if (Get-ScheduledTask -TaskName $TName -ErrorAction SilentlyContinue) {
             Unregister-ScheduledTask -TaskName $TName -Confirm:$false | Out-Null
             Write-Log -Message "Removed task: $TName" -Type "INFO" -Color Gray
@@ -3036,6 +3267,7 @@ function Uninstall-Persistence {
         Remove-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentPasswordSalt" -ErrorAction SilentlyContinue
         Remove-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -ErrorAction SilentlyContinue
         Remove-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeTimestamp" -ErrorAction SilentlyContinue
+        Remove-ItemProperty -Path $IntegrityRegPath -Name $TamperDetectedRegName -ErrorAction SilentlyContinue
     }
 
     # Remove Global CLI Command (relax ACL first) - then delete via SYSTEM helper if needed
@@ -3104,6 +3336,7 @@ function Uninstall-Persistence {
     if (Get-ScheduledTask -TaskName $ChildLogonTaskName -ErrorAction SilentlyContinue) { $FailedCount++; Write-Log -Message "Task $ChildLogonTaskName still exists." -Type "ERROR" -Color Red }
     if (Get-ScheduledTask -TaskName $ProgramScannerName -ErrorAction SilentlyContinue) { $FailedCount++; Write-Log -Message "Task $ProgramScannerName still exists." -Type "ERROR" -Color Red }
     if (Get-ScheduledTask -TaskName $ScreenTimeTaskName -ErrorAction SilentlyContinue) { $FailedCount++; Write-Log -Message "Task $ScreenTimeTaskName still exists." -Type "ERROR" -Color Red }
+    if (Get-ScheduledTask -TaskName "OSGuard-TamperLockout" -ErrorAction SilentlyContinue) { $FailedCount++; Write-Log -Message "Task OSGuard-TamperLockout still exists." -Type "ERROR" -Color Red }
     if (Test-Path $InstallDir) { $FailedCount++; Write-Log -Message "Install directory $InstallDir still exists." -Type "ERROR" -Color Red }
     if (Test-Path $CmdPath) { $FailedCount++; Write-Log -Message "Global CLI $CmdPath still exists." -Type "ERROR" -Color Red }
     $CurrentPath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
@@ -3126,6 +3359,11 @@ if ($ChildLock) {
     # Only apply if the current user IS the child (defense: don't lock an admin by accident)
     $CurrentUserName = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     if ($CurrentUserName -notmatch "$ChildUser$") {
+        return
+    }
+    # If tamper lockout is active, show the lockout screen instead of normal policies
+    if (Test-TamperDetected) {
+        Show-TamperLockoutScreen
         return
     }
     foreach ($Policy in $ChildHivePolicies) {
@@ -3156,14 +3394,45 @@ if ($SilentLock) {
     if ($ExpectedHash) {
         $ActualHash = (Get-FileHash -Path $InstallScript -Algorithm SHA256).Hash
         if ($ExpectedHash.Trim() -ne $ActualHash.Trim()) {
-            Write-Log -Message "INTEGRITY FAILURE: Registry hash mismatch!" -Type "SECURITY" -Color Red
+            Write-Log -Message "INTEGRITY FAILURE: Registry hash mismatch! Tamper lockout activated." -Type "SECURITY" -Color Red
+            Set-TamperDetected
+            # Trigger immediate lockout if child is currently logged in
+            $ChildSession = $null
+            try { $ChildSession = Get-CimInstance Win32_LoggedOnUser -ErrorAction SilentlyContinue | Where-Object { $_.Antecedent -match "Name=`"$ChildUser`"" } | Select-Object -First 1 } catch {}
+            if ($ChildSession -and -not (Get-ScheduledTask -TaskName "OSGuard-TamperLockout" -ErrorAction SilentlyContinue)) {
+                Write-Log -Message "Child session detected. Scheduling immediate tamper lockout..." -Type "SECURITY" -Color Red
+                try {
+                    $TamperAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$InstallScript`" -TamperLockout"
+                    $TamperTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(3)
+                    $TamperPrincipal = New-ScheduledTaskPrincipal -UserId $ChildUser -LogonType Interactive
+                    Register-ScheduledTask -TaskName "OSGuard-TamperLockout" -Action $TamperAction -Trigger $TamperTrigger -Principal $TamperPrincipal -Force | Out-Null
+                    Start-ScheduledTask -TaskName "OSGuard-TamperLockout"
+                } catch {
+                    Write-Log -Message "Failed to schedule immediate tamper lockout: $_" -Type "WARN" -Color Yellow
+                }
+            }
             $HashCheckPassed = $false
         }
     } elseif (Test-Path $IntegrityFile) {
         $ExpectedHash = Get-Content -Path $IntegrityFile -Raw
         $ActualHash = (Get-FileHash -Path $InstallScript -Algorithm SHA256).Hash
         if ($ExpectedHash.Trim() -ne $ActualHash.Trim()) {
-            Write-Log -Message "INTEGRITY FAILURE: File hash mismatch!" -Type "SECURITY" -Color Red
+            Write-Log -Message "INTEGRITY FAILURE: File hash mismatch! Tamper lockout activated." -Type "SECURITY" -Color Red
+            Set-TamperDetected
+            $ChildSession = $null
+            try { $ChildSession = Get-CimInstance Win32_LoggedOnUser -ErrorAction SilentlyContinue | Where-Object { $_.Antecedent -match "Name=`"$ChildUser`"" } | Select-Object -First 1 } catch {}
+            if ($ChildSession -and -not (Get-ScheduledTask -TaskName "OSGuard-TamperLockout" -ErrorAction SilentlyContinue)) {
+                Write-Log -Message "Child session detected. Scheduling immediate tamper lockout..." -Type "SECURITY" -Color Red
+                try {
+                    $TamperAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$InstallScript`" -TamperLockout"
+                    $TamperTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(3)
+                    $TamperPrincipal = New-ScheduledTaskPrincipal -UserId $ChildUser -LogonType Interactive
+                    Register-ScheduledTask -TaskName "OSGuard-TamperLockout" -Action $TamperAction -Trigger $TamperTrigger -Principal $TamperPrincipal -Force | Out-Null
+                    Start-ScheduledTask -TaskName "OSGuard-TamperLockout"
+                } catch {
+                    Write-Log -Message "Failed to schedule immediate tamper lockout: $_" -Type "WARN" -Color Yellow
+                }
+            }
             $HashCheckPassed = $false
         }
     }
@@ -3273,13 +3542,17 @@ if ($SilentLock) {
         }
     }
 
-    # Ensure parent mode flag is cleared (defense: never leave unlocked after a silent heal)
-    try {
-        Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-    } catch {}
+    # Only clear Parent Mode and re-apply locks if Parent Mode is NOT active
+    $ParentModeActive = $false
+    try { $ParentModeActive = (Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -ErrorAction SilentlyContinue).OSGuardParentModeActive -eq 1 } catch {}
+    if (-not $ParentModeActive) {
+        try {
+            Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+        } catch {}
 
-    Enable-DNSLock
-    Enable-OSLock
+        Enable-DNSLock
+        Enable-OSLock
+    }
     return
 }
 
@@ -3298,6 +3571,7 @@ if ($ContinueParentMode) {
     }
     return
 }
+if ($TamperLockout) { Show-TamperLockoutScreen; return }
 if ($ProgramScan) { Scan-And-Harden-ChildPrograms; return }
 if ($SetScreenTime) { Show-SetScreenTimeDialog; return }
 if ($ScreenTimeStatus) { Show-ScreenTimeStatus; return }
@@ -3341,9 +3615,13 @@ do {
     Write-Host "[6] EXIT TERMINAL" -ForegroundColor Gray
     Write-Host "[7] ENTER PARENT MODE (Unlock with password)" -ForegroundColor Green
     Write-Host "[8] LOCK NOW (Re-lock immediately)" -ForegroundColor Cyan
+    Write-Host "[9] SET SCREEN TIME" -ForegroundColor Cyan
+    Write-Host "[10] SCREEN TIME STATUS" -ForegroundColor Cyan
+    Write-Host "[11] GRANT BROWSER TIME" -ForegroundColor Cyan
+    Write-Host "[12] SET PARENT MODE PASSWORD" -ForegroundColor Green
     Write-Host "-----------------------------------------------------"
 
-    $Choice = Read-Host "Select an administrative action (1-8)"
+    $Choice = Read-Host "Select an administrative action (1-12)"
     $IntegrityStatus = Test-IntegrityStatus
 
     switch ($Choice) {
@@ -3396,6 +3674,37 @@ do {
                 Write-Host "Use option [4] to uninstall, then reinstall from a clean source." -ForegroundColor Yellow
             } else {
                 Exit-ParentMode
+            }
+            Write-Host "`n[ PRESS ANY KEY TO RETURN TO MENU ]" -ForegroundColor DarkGray; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        }
+        "9" {
+            if ($IntegrityStatus -eq $false) {
+                Write-Host "`n[BLOCKED] Option [9] is disabled because the script has been tampered with." -ForegroundColor Red -BackgroundColor Black
+                Write-Host "Use option [4] to uninstall, then reinstall from a clean source." -ForegroundColor Yellow
+            } else {
+                Show-SetScreenTimeDialog
+            }
+            Write-Host "`n[ PRESS ANY KEY TO RETURN TO MENU ]" -ForegroundColor DarkGray; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        }
+        "10" {
+            Show-ScreenTimeStatus
+            Write-Host "`n[ PRESS ANY KEY TO RETURN TO MENU ]" -ForegroundColor DarkGray; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        }
+        "11" {
+            if ($IntegrityStatus -eq $false) {
+                Write-Host "`n[BLOCKED] Option [11] is disabled because the script has been tampered with." -ForegroundColor Red -BackgroundColor Black
+                Write-Host "Use option [4] to uninstall, then reinstall from a clean source." -ForegroundColor Yellow
+            } else {
+                Show-GrantBrowserTimeDialog
+            }
+            Write-Host "`n[ PRESS ANY KEY TO RETURN TO MENU ]" -ForegroundColor DarkGray; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        }
+        "12" {
+            if ($IntegrityStatus -eq $false) {
+                Write-Host "`n[BLOCKED] Option [12] is disabled because the script has been tampered with." -ForegroundColor Red -BackgroundColor Black
+                Write-Host "Use option [4] to uninstall, then reinstall from a clean source." -ForegroundColor Yellow
+            } else {
+                Set-ParentPassword
             }
             Write-Host "`n[ PRESS ANY KEY TO RETURN TO MENU ]" -ForegroundColor DarkGray; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
         }
