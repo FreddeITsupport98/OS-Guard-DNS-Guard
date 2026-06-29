@@ -1,8 +1,10 @@
 # OS-Guard + DNS-Guard
 
-<p align="center">
-  <img src="icon/osguard_dnsguard.jpg" alt="OSGuard DNSGuard Logo" width="600" style="border-radius: 16px; border: 2px solid #3b82f6;" />
-</p>
+<div align="center">
+  <div style="border-radius: 16px; overflow: hidden; display: inline-block; border: 2px solid #3b82f6;">
+    <img src="icon/osguard_dnsguard.jpg" alt="OSGuard DNSGuard Logo" width="600" />
+  </div>
+</div>
 
 Enterprise **OS Child Lockdown** + **DNS Hijack Protection** & Installer Suite (IPv4 & IPv6 + DoH)
 
