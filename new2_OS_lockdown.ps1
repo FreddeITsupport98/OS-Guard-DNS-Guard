@@ -145,7 +145,7 @@ $IntegrityRegPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WpnPlatform
 $TamperDetectedRegName = "OSGuardTamperDetected"
 
 # Parent Mode AFK Watch script embedded as Base64 (written fresh at install and every silent heal)
-$ParentModeWatchB64 = "JFJlZ1BhdGggPSAiSEtMTTpcU09GVFdBUkVcTWljcm9zb2Z0XFdpbmRvd3NcQ3VycmVudFZlcnNpb25cV3BuUGxhdGZvcm1cU2V0dGluZ3MiCiRBY3RpdmUgPSAoR2V0LUl0ZW1Qcm9wZXJ0eSAtUGF0aCAkUmVnUGF0aCAtTmFtZSAiT1NHdWFyZFBhcmVudE1vZGVBY3RpdmUiIC1FcnJvckFjdGlvbiBTaWxlbnRseUNvbnRpbnVlKS5PU0d1YXJkUGFyZW50TW9kZUFjdGl2ZQppZiAoJEFjdGl2ZSAtbmUgMSkgeyByZXR1cm4gfQoKQWRkLVR5cGUgQCIKdXNpbmcgU3lzdGVtOwp1c2luZyBTeXN0ZW0uUnVudGltZS5JbnRlcm9wU2VydmljZXM7CnB1YmxpYyBjbGFzcyBJZGxlVGltZSB7CiAgICBbRGxsSW1wb3J0KCJ1c2VyMzIuZGxsIildIHN0YXRpYyBleHRlcm4gYm9vbCBHZXRMYXN0SW5wdXRJbmZvKHJlZiBMQVNUSU5QVVRJTkZPIHBsaWkpOwogICAgW1N0cnVjdExheW91dChMYXlvdXRLaW5kLlNlcXVlbnRpYWwpXSBzdHJ1Y3QgTEFTVElOUFVUSU5GTyB7IHB1YmxpYyB1aW50IGNiU2l6ZTsgcHVibGljIHVpbnQgZHdUaW1lOyB9CiAgICBwdWJsaWMgc3RhdGljIHVpbnQgR2V0SWRsZVRpbWUoKSB7CiAgICAgICAgTEFTVElOUFVUSU5GTyBsaWkgPSBuZXcgTEFTVElOUFVUSU5GTygpOyBsaWkuY2JTaXplID0gKHVpbnQpTWFyc2hhbC5TaXplT2YodHlwZW9mKExBU1RJTlBVVElORk8pKTsKICAgICAgICBHZXRMYXN0SW5wdXRJbmZvKHJlZiBsaWkpOwogICAgICAgIHJldHVybiAodWludClFbnZpcm9ubWVudC5UaWNrQ291bnQgLSBsaWkuZHdUaW1lOwogICAgfQp9CiJACgokSWRsZU1zID0gW0lkbGVUaW1lXTo6R2V0SWRsZVRpbWUoKQokVGltZW91dCA9IDUgKiA2MCAqIDEwMDAKaWYgKCRJZGxlTXMgLWd0ICRUaW1lb3V0KSB7CiAgICAmICJDOlxXaW5kb3dzXG9zbG9jay5jbWQiIC1Mb2NrTm93Cn0="
+$ParentModeWatchB64 = "JFJlZ1BhdGggPSBIS0xNOlxTT0ZUV0FSRVxNaWNyb3NvZnRcV2luZG93c1xDdXJyZW50VmVyc2lvblxXcG5QbGF0Zm9ybVxTZXR0aW5ncwp0cnkgeyAkUGFyZW50QWN0aXZlID0gKEdldC1JdGVtUHJvcGVydHlWYWx1ZSAtUGF0aCAkUmVnUGF0aCAtTmFtZSAiT1NHdWFyZFBhcmVudE1vZGVBY3RpdmUiIC1FcnJvckFjdGlvbiBTdG9wKSB9IGNhdGNoIHsgJFBhcmVudEFjdGl2ZSA9ICRudWxsIH0KdHJ5IHsgJFRlbXBBY3RpdmUgPSAoR2V0LUl0ZW1Qcm9wZXJ0eVZhbHVlIC1QYXRoICRSZWdQYXRoIC1OYW1lICJPU0d1YXJkVGVtcFVubG9ja0FjdGl2ZSIgLUVycm9yQWN0aW9uIFN0b3ApIH0gY2F0Y2ggeyAkVGVtcEFjdGl2ZSA9ICRudWxsIH0KaWYgKCRQYXJlbnRBY3RpdmUgLW5lIDEgLWFuZCAkVGVtcEFjdGl2ZSAtbmUgMSkgeyByZXR1cm4gfQoKQWRkLVR5cGUgQCIKdXNpbmcgU3lzdGVtOwp1c2luZyBTeXN0ZW0uUnVudGltZS5JbnRlcm9wU2VydmljZXM7CnB1YmxpYyBjbGFzcyBJZGxlVGltZSB7CiAgICBbRGxsSW1wb3J0KCJ1c2VyMzIuZGxsIildIHN0YXRpYyBleHRlcm4gYm9vbCBHZXRMYXN0SW5wdXRJbmZvKHJlZiBMQVNUSU5QVVRJTkZPIHBsaWkpOwogICAgW1N0cnVjdExheW91dChMYXlvdXRLaW5kLlNlcXVlbnRpYWwpXSBzdHJ1Y3QgTEFTVElOUFVUSU5GTyB7IHB1YmxpYyB1aW50IGNiU2l6ZTsgcHVibGljIHVpbnQgZHdUaW1lOyB9CiAgICBwdWJsaWMgc3RhdGljIHVpbnQgR2V0SWRsZVRpbWUoKSB7CiAgICAgICAgTEFTVElOUFVUSU5GTyBsaWkgPSBuZXcgTEFTVElOUFVUSU5GTygpOyBsaWkuY2JTaXplID0gKHVpbnQpTWFyc2hhbC5TaXplT2YodHlwZW9mKExBU1RJTlBVVElORk8pKTsKICAgICAgICBHZXRMYXN0SW5wdXRJbmZvKHJlZiBsaWkpOwogICAgICAgIHJldHVybiAodWludClFbnZpcm9ubWVudC5UaWNrQ291bnQgLSBsaWkuZHdUaW1lOwogICAgfQp9CiJACgokSWRsZU1zID0gW0lkbGVUaW1lXTo6R2V0SWRsZVRpbWUoKQokVGltZW91dCA9IDUgKiA2MCAqIDEwMDAKaWYgKCRJZGxlTXMgLWd0ICRUaW1lb3V0KSB7CiAgICAmICJDOlxXaW5kb3dzXG9zbG9jay5jbWQiIC1Mb2NrTm93Cn0="
 
 # Setup Auto-Logging
 $ScriptDir = Split-Path -Parent -Path $PSCommandPath
@@ -1532,6 +1532,8 @@ function Exit-ParentMode {
     try {
         Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
         Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeTimestamp" -Value "" -Type String -Force -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardTempUnlockActive" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardTempUnlockTimestamp" -Value "" -Type String -Force -ErrorAction SilentlyContinue
     } catch {}
     Write-Log -Message "Parent Mode ended. System re-locked." -Type "SUCCESS" -Color Green
     Write-Host "[LOCKED] System is secured again." -ForegroundColor Green
@@ -2430,6 +2432,12 @@ function Enable-OSLock {
         }
     }
 
+    # Clear any temporary unlock flags when re-locking
+    try {
+        Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardTempUnlockActive" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardTempUnlockTimestamp" -Value "" -Type String -Force -ErrorAction SilentlyContinue
+    } catch {}
+
     # 1. Ensure child account exists and is a standard user (passwordless)
     New-ChildAccount | Out-Null
 
@@ -2508,7 +2516,10 @@ function Enable-OSLock {
 }
 
 function Disable-OSLock {
-    param([switch]$KeepChildAccount)
+    param(
+        [switch]$KeepChildAccount,
+        [switch]$SetTempUnlockFlag
+    )
     Write-Log -Message "Initiating OS Child Lockdown removal..." -Type "ACTION" -Color Magenta
 
     if (-not $SilentLock) {
@@ -2534,6 +2545,16 @@ function Disable-OSLock {
         Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
         Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeTimestamp" -Value "" -Type String -Force -ErrorAction SilentlyContinue
     } catch {}
+
+    # Set temporary unlock flag if requested (prevents guardian re-lock)
+    if ($SetTempUnlockFlag -and -not $SilentLock) {
+        try {
+            Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardTempUnlockActive" -Value 1 -Type DWord -Force -ErrorAction Stop
+            Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardTempUnlockTimestamp" -Value (Get-Date -Format "o") -Type String -Force -ErrorAction Stop
+        } catch {
+            Write-Log -Message "Failed to set temp unlock flag: $_" -Type "WARN" -Color Yellow
+        }
+    }
 
     if (-not $KeepChildAccount) {
         # 2. Remove per-user policies from the child's live and offline hives
@@ -4149,6 +4170,8 @@ function Uninstall-Persistence {
         Remove-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentPasswordIterations" -ErrorAction SilentlyContinue
         Remove-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -ErrorAction SilentlyContinue
         Remove-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeTimestamp" -ErrorAction SilentlyContinue
+        Remove-ItemProperty -Path $IntegrityRegPath -Name "OSGuardTempUnlockActive" -ErrorAction SilentlyContinue
+        Remove-ItemProperty -Path $IntegrityRegPath -Name "OSGuardTempUnlockTimestamp" -ErrorAction SilentlyContinue
         Remove-ItemProperty -Path $IntegrityRegPath -Name $TamperDetectedRegName -ErrorAction SilentlyContinue
     }
 
@@ -4443,9 +4466,12 @@ if ($SilentLock) {
     # Only clear Parent Mode and re-apply locks if Parent Mode is NOT active
     $ParentModeActive = $false
     try { $ParentModeActive = Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "OSGuardParentModeActive" -ErrorAction SilentlyContinue -eq 1 } catch {}
-    if (-not $ParentModeActive) {
+    $TempUnlockActive = $false
+    try { $TempUnlockActive = Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardTempUnlockActive" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "OSGuardTempUnlockActive" -ErrorAction SilentlyContinue -eq 1 } catch {}
+    if (-not $ParentModeActive -and -not $TempUnlockActive) {
         try {
             Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardTempUnlockActive" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
         } catch {}
 
         Enable-DNSLock
@@ -4508,9 +4534,16 @@ do {
     $CurrentStatus = Get-LockStatus
     $CategoryGrid = Show-CategoryGrid
 
+    $TempUnlockActive = $false
+    try { $TempUnlockActive = Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardTempUnlockActive" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "OSGuardTempUnlockActive" -ErrorAction SilentlyContinue -eq 1 } catch {}
+
     Write-Host "`n-----------------------------------------------------"
     Write-Host "[1] DEPLOY ALL LOCKS (DNS + OS Child Lockdown)" -ForegroundColor Cyan
-    Write-Host "[2] REMOVE ALL LOCKS (Restore Access)" -ForegroundColor Yellow
+    if ($TempUnlockActive) {
+        Write-Host "[2] RE-LOCK SYSTEM (End Temporary Unlock)" -ForegroundColor Cyan
+    } else {
+        Write-Host "[2] TEMPORARY UNLOCK (Restore Access)" -ForegroundColor Yellow
+    }
     if (-not (Test-Path $InstallDir)) {
         Write-Host "[3] INSTALL SERVICE (Auto-Heal & Create 'oslock' command)" -ForegroundColor Green
     }
@@ -4548,8 +4581,22 @@ do {
                 Write-Host "`n[BLOCKED] Option [2] is disabled because the script has been tampered with." -ForegroundColor Red -BackgroundColor Black
                 Write-Host "Use option [4] to uninstall, then reinstall from a clean source." -ForegroundColor Yellow
             } else {
-                Disable-DNSLock
-                Disable-OSLock -KeepChildAccount
+                if ($TempUnlockActive) {
+                    # Re-lock system
+                    try {
+                        Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardTempUnlockActive" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                        Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardTempUnlockTimestamp" -Value "" -Type String -Force -ErrorAction SilentlyContinue
+                    } catch {}
+                    Enable-DNSLock
+                    Enable-OSLock
+                    Write-Host "`n[LOCKED] System re-locked. Temporary unlock ended." -ForegroundColor Green
+                } else {
+                    Disable-DNSLock
+                    Disable-OSLock -KeepChildAccount -SetTempUnlockFlag
+                    Write-Host "`n[UNLOCKED] Temporary admin unlock active. Guardians suppressed." -ForegroundColor Yellow
+                    Write-Host "  Press [2] again to re-lock, or use [8] LOCK NOW." -ForegroundColor Yellow
+                    Write-Host "  Auto-locks after 5 minutes of inactivity." -ForegroundColor Yellow
+                }
             }
             Write-Host "`n[ PRESS ANY KEY TO RETURN TO MENU ]" -ForegroundColor DarkGray; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
         }
