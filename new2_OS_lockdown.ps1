@@ -3294,17 +3294,20 @@ function Show-CategoryGrid {
     # --- Canary File ---
     $Categories["Canary File"] = (Test-Canary)
 
-    # --- Task Scheduler Health ---
-    $ScheduleStart = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Schedule" -Name "Start" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "Start" -ErrorAction SilentlyContinue
-    $Categories["Task Scheduler"] = ($ScheduleStart -ne 4)
+    # --- Task Scheduler (OS-Guard Tasks Installed) ---
+    $Categories["Task Scheduler"] = ($null -ne (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue))
 
     # --- Firewall Rules ---
     $FwRules = $null
     try { $FwRules = netsh advfirewall firewall show rule name=all dir=out | Select-String "^Rule Name:\s+(OSGuard-BlockOutbound.*)" } catch {}
     $Categories["Firewall Rules"] = ($null -ne $FwRules -and $FwRules.Count -gt 0)
 
-    # --- Geofencing ---
-    $Categories["Geofencing"] = (Test-HomeNetwork)
+    # --- Geofencing (Stricter Lockdown Active) ---
+    if ([string]::IsNullOrWhiteSpace($script:HomeSSID)) {
+        $Categories["Geofencing"] = $false
+    } else {
+        $Categories["Geofencing"] = -not (Test-HomeNetwork)
+    }
 
     # --- Parent Mode Active ---
     $ParentModeActive = $false
