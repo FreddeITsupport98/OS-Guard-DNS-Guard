@@ -3152,12 +3152,11 @@ function Show-CategoryGrid {
     $Categories["Windows Update UI"] = ($WuBlocked -eq 1)
 
     # --- Child Account ---
-    $ChildAccount = $null
-    try { $ChildAccount = Get-LocalUser -Name $ChildUser -ErrorAction Stop } catch {}
-    $Categories["Child Account"] = ($null -ne $ChildAccount)
+    $Categories["Child Account"] = ($null -ne (Get-ChildAccount))
 
     # --- Child Hive: prefer live session if child is logged in ---
     $HiveMount = $null
+    $HiveLoaded = $false
     $ChildSidValue = Get-ChildSid
     if ($ChildSidValue -and (Test-Path "Registry::HKEY_USERS\$ChildSidValue")) {
         $HiveMount = $ChildSidValue
@@ -3169,7 +3168,7 @@ function Show-CategoryGrid {
             if (Test-Path $NtUserDat) {
                 if (Test-Path "Registry::HKEY_USERS\OSGuardChildPolicy") { reg.exe unload "HKU\OSGuardChildPolicy" 2>&1 | Out-Null }
                 $Output = & reg.exe load "HKU\OSGuardChildPolicy" "$NtUserDat" 2>&1
-                if (Test-Path "Registry::HKEY_USERS\OSGuardChildPolicy") { $HiveMount = "OSGuardChildPolicy" }
+                if (Test-Path "Registry::HKEY_USERS\OSGuardChildPolicy") { $HiveMount = "OSGuardChildPolicy"; $HiveLoaded = $true }
             }
         }
     }
@@ -3212,25 +3211,27 @@ function Show-CategoryGrid {
         $ChromeDisallowed = Get-ItemProperty -Path "Registry::HKEY_USERS\$HiveMount\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "51" -ErrorAction SilentlyContinue
         $Categories["Alt Browser Block"] = ($DisallowRun -eq 1 -and $ChromeDisallowed -eq "chrome.exe")
 
-        [System.GC]::Collect(); [System.GC]::WaitForPendingFinalizers(); Start-Sleep -Milliseconds 300
-        reg.exe unload "HKU\OSGuardChildPolicy" 2>&1 | Out-Null
+        if ($HiveLoaded) {
+            [System.GC]::Collect(); [System.GC]::WaitForPendingFinalizers(); Start-Sleep -Milliseconds 300
+            reg.exe unload "HKU\OSGuardChildPolicy" 2>&1 | Out-Null
+        }
     } else {
-        $Categories["Task Manager"] = $null
-        $Categories["Registry Tools"] = $null
-        $Categories["CMD / Run"] = $null
-        $Categories["Control Panel"] = $null
-        $Categories["Right-Click Menu"] = $null
-        $Categories["Folder Options"] = $null
-        $Categories["Taskbar"] = $null
-        $Categories["Printers"] = $null
-        $Categories["Wallpaper/Themes"] = $null
-        $Categories["AutoPlay"] = $null
-        $Categories["Admin Tools"] = $null
-        $Categories["Add/Remove Prog"] = $null
-        $Categories["Password Change"] = $null
-        $Categories["Network UI"] = $null
-        $Categories["This PC Hidden"] = $null
-        $Categories["Alt Browser Block"] = $null
+        $Categories["Task Manager"] = $false
+        $Categories["Registry Tools"] = $false
+        $Categories["CMD / Run"] = $false
+        $Categories["Control Panel"] = $false
+        $Categories["Right-Click Menu"] = $false
+        $Categories["Folder Options"] = $false
+        $Categories["Taskbar"] = $false
+        $Categories["Printers"] = $false
+        $Categories["Wallpaper/Themes"] = $false
+        $Categories["AutoPlay"] = $false
+        $Categories["Admin Tools"] = $false
+        $Categories["Add/Remove Prog"] = $false
+        $Categories["Password Change"] = $false
+        $Categories["Network UI"] = $false
+        $Categories["This PC Hidden"] = $false
+        $Categories["Alt Browser Block"] = $false
     }
 
     # --- Browser Lockdown (Edge-Only) ---
