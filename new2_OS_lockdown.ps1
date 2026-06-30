@@ -483,7 +483,9 @@ function New-PBKDF2Hash {
 
 function Get-PBKDF2Salt {
     $Salt = [byte[]]::new(32)
-    [System.Security.Cryptography.RandomNumberGenerator]::Fill($Salt)
+    $Rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $Rng.GetBytes($Salt)
+    $Rng.Dispose()
     return [Convert]::ToBase64String($Salt)
 }
 
@@ -511,6 +513,7 @@ function New-ChildAccount {
         # Prevent password change
         net user $ChildUser /passwordchg:no 2>&1 | Out-Null
         net user $ChildUser /passwordreq:no 2>&1 | Out-Null
+        Clear-ChildCache
         return $false  # not newly created
     }
 
@@ -549,6 +552,7 @@ function New-ChildAccount {
     # Enable the account (in case it was created disabled)
     Enable-LocalUser -Name $ChildUser -ErrorAction SilentlyContinue
 
+    Clear-ChildCache
     return $true  # newly created
 }
 
@@ -1353,8 +1357,8 @@ function Remove-BrowserRequestShortcut {
 }
 
 function New-GrantBrowserTimeShortcut {
-    $AdminProfile = $env:USERPROFILE
-    $AdminDesktop = Join-Path $AdminProfile "Desktop"
+    $Wsh = New-Object -ComObject WScript.Shell
+    $AdminDesktop = $Wsh.SpecialFolders("Desktop")
     if (-not (Test-Path $AdminDesktop)) { New-Item -ItemType Directory -Path $AdminDesktop -Force -ErrorAction SilentlyContinue | Out-Null }
     $ShortcutPath = Join-Path $AdminDesktop "Grant Browser Time.lnk"
     try {
@@ -1376,8 +1380,8 @@ function New-GrantBrowserTimeShortcut {
 }
 
 function Remove-GrantBrowserTimeShortcut {
-    $AdminProfile = $env:USERPROFILE
-    $AdminDesktop = Join-Path $AdminProfile "Desktop"
+    $Wsh = New-Object -ComObject WScript.Shell
+    $AdminDesktop = $Wsh.SpecialFolders("Desktop")
     $Path = Join-Path $AdminDesktop "Grant Browser Time.lnk"
     if (Test-Path $Path) {
         try {
@@ -1751,8 +1755,8 @@ function New-ParentModeShortcut {
     <#
         Creates Parent Mode, Lock Now, and Continue shortcuts on the admin desktop.
     #>
-    $AdminProfile = $env:USERPROFILE
-    $AdminDesktop = Join-Path $AdminProfile "Desktop"
+    $Wsh = New-Object -ComObject WScript.Shell
+    $AdminDesktop = $Wsh.SpecialFolders("Desktop")
     if (-not (Test-Path $AdminDesktop)) { New-Item -ItemType Directory -Path $AdminDesktop -Force -ErrorAction SilentlyContinue | Out-Null }
 
     $Shortcuts = @(
@@ -1784,8 +1788,8 @@ function New-ParentModeShortcut {
 }
 
 function Remove-ParentModeShortcut {
-    $AdminProfile = $env:USERPROFILE
-    $AdminDesktop = Join-Path $AdminProfile "Desktop"
+    $Wsh = New-Object -ComObject WScript.Shell
+    $AdminDesktop = $Wsh.SpecialFolders("Desktop")
     foreach ($Name in @("Parent Mode.lnk", "Lock Now.lnk", "Continue Parent Mode.lnk", "Admin CMD.lnk", "Admin PowerShell.lnk")) {
         $Path = Join-Path $AdminDesktop $Name
         if (Test-Path $Path) {
@@ -1806,8 +1810,8 @@ function New-ParentModeAdminTools {
         Creates Admin CMD and Admin PowerShell shortcuts on the admin desktop
         during Parent Mode so the admin can quickly open elevated terminals.
     #>
-    $AdminProfile = $env:USERPROFILE
-    $AdminDesktop = Join-Path $AdminProfile "Desktop"
+    $Wsh = New-Object -ComObject WScript.Shell
+    $AdminDesktop = $Wsh.SpecialFolders("Desktop")
     if (-not (Test-Path $AdminDesktop)) { New-Item -ItemType Directory -Path $AdminDesktop -Force -ErrorAction SilentlyContinue | Out-Null }
 
     $Tools = @(
@@ -1840,8 +1844,8 @@ function Remove-ParentModeAdminTools {
     <#
         Removes the Admin CMD and Admin PowerShell shortcuts from the admin desktop.
     #>
-    $AdminProfile = $env:USERPROFILE
-    $AdminDesktop = Join-Path $AdminProfile "Desktop"
+    $Wsh = New-Object -ComObject WScript.Shell
+    $AdminDesktop = $Wsh.SpecialFolders("Desktop")
     foreach ($Name in @("Admin CMD.lnk", "Admin PowerShell.lnk", "Approve Child Install.lnk")) {
         $Path = Join-Path $AdminDesktop $Name
         if (Test-Path $Path) {
@@ -3463,7 +3467,9 @@ function Set-Canary {
     #>
     try {
         $RandomBytes = [byte[]]::new(64)
-        [System.Security.Cryptography.RandomNumberGenerator]::Fill($RandomBytes)
+        $Rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        $Rng.GetBytes($RandomBytes)
+        $Rng.Dispose()
         [System.IO.File]::WriteAllBytes($CanaryFile, $RandomBytes)
         (Get-Item $CanaryFile).Attributes = 'Hidden'
         $CanaryHash = (Get-FileHash -Path $CanaryFile -Algorithm SHA256).Hash
@@ -3738,56 +3744,6 @@ function Install-Persistence {
     Set-Content -Path $IntegrityFile -Value $ScriptHash -Encoding UTF8 -Force
     Write-Log -Message "Self-integrity hash file written." -Type "INFO" -Color Gray
 
-    # --- NTFS PAYLOAD SELF-DEFENSE ---
-    Write-Log -Message "Hardening NTFS Permissions on installation directory and files..." -Type "INFO" -Color Yellow
-    try {
-        $SidUsers = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-11")
-
-        # Set owner to SYSTEM on directory and all existing files
-        $DirAcl = Get-Acl -Path $InstallDir
-        $DirAcl.SetOwner($SidSystem)
-        Set-Acl -Path $InstallDir -AclObject $DirAcl
-        Get-ChildItem -Path $InstallDir -File | ForEach-Object {
-            $FileAcl = Get-Acl -Path $_.FullName
-            $FileAcl.SetOwner($SidSystem)
-            Set-Acl -Path $_.FullName -AclObject $FileAcl
-        }
-
-        # Harden directory ACL
-        $DirAcl = Get-Acl -Path $InstallDir
-        $DirAcl.SetAccessRuleProtection($true, $false)
-        $DirAcl.Access | ForEach-Object { $DirAcl.RemoveAccessRule($_) | Out-Null }
-
-        # SYSTEM: FullControl
-        $DirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidSystem, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")))
-        # Admins: ReadAndExecute only (cannot delete, modify, or change permissions)
-        $DirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")))
-        $DirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "DeleteSubdirectoriesAndFiles", "ContainerInherit,ObjectInherit", "None", "Deny")))
-        $DirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "ChangePermissions", "ContainerInherit,ObjectInherit", "None", "Deny")))
-        $DirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "TakeOwnership", "ContainerInherit,ObjectInherit", "None", "Deny")))
-        # Authenticated Users: ReadAndExecute
-        $DirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidUsers, "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")))
-
-        Set-Acl -Path $InstallDir -AclObject $DirAcl
-
-        # Explicitly harden each file
-        Get-ChildItem -Path $InstallDir -File | ForEach-Object {
-            $FileAcl = Get-Acl -Path $_.FullName
-            $FileAcl.SetAccessRuleProtection($true, $false)
-            $FileAcl.Access | ForEach-Object { $FileAcl.RemoveAccessRule($_) | Out-Null }
-            $FileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidSystem, "FullControl", "None", "None", "Allow")))
-            $FileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "ReadAndExecute", "None", "None", "Allow")))
-            $FileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "Delete", "None", "None", "Deny")))
-            $FileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "ChangePermissions", "None", "None", "Deny")))
-            $FileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "TakeOwnership", "None", "None", "Deny")))
-            $FileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidUsers, "ReadAndExecute", "None", "None", "Allow")))
-            Set-Acl -Path $_.FullName -AclObject $FileAcl
-        }
-
-        Write-Log -Message "Installation directory and files locked. Owner=SYSTEM, Admins=ReadOnly+NoDelete." -Type "SUCCESS" -Color Green
-    } catch {
-        Write-Log -Message "Failed to harden NTFS permissions: $_" -Type "ERROR" -Color Red
-    }
 
     # 2. Build the Global CLI Command (oslock) in C:\Windows (ASCII encoding, no BOM)
     Out-File -FilePath $CmdPath -InputObject $CmdBatContent -Encoding ASCII -Force
@@ -3980,6 +3936,57 @@ function Install-Persistence {
     $WatchPrincipal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
     Register-ScheduledTask -TaskName $ParentModeWatchName -Action $WatchAction -Trigger $WatchTrigger -Principal $WatchPrincipal -Force | Out-Null
     Write-Log -Message "Parent Mode AFK watcher registered (1-minute heartbeat, 5-minute idle timeout)." -Type "INFO" -Color Gray
+
+    # --- NTFS PAYLOAD SELF-DEFENSE (runs after all files are written) ---
+    Write-Log -Message "Hardening NTFS Permissions on installation directory and files..." -Type "INFO" -Color Yellow
+    try {
+        $SidUsers = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-11")
+
+        # Set owner to SYSTEM on directory and all existing files
+        $DirAcl = Get-Acl -Path $InstallDir
+        $DirAcl.SetOwner($SidSystem)
+        Set-Acl -Path $InstallDir -AclObject $DirAcl
+        Get-ChildItem -Path $InstallDir -File | ForEach-Object {
+            $FileAcl = Get-Acl -Path $_.FullName
+            $FileAcl.SetOwner($SidSystem)
+            Set-Acl -Path $_.FullName -AclObject $FileAcl
+        }
+
+        # Harden directory ACL
+        $DirAcl = Get-Acl -Path $InstallDir
+        $DirAcl.SetAccessRuleProtection($true, $false)
+        $DirAcl.Access | ForEach-Object { $DirAcl.RemoveAccessRule($_) | Out-Null }
+
+        # SYSTEM: FullControl
+        $DirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidSystem, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")))
+        # Admins: ReadAndExecute only (cannot delete, modify, or change permissions)
+        $DirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")))
+        $DirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "DeleteSubdirectoriesAndFiles", "ContainerInherit,ObjectInherit", "None", "Deny")))
+        $DirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "ChangePermissions", "ContainerInherit,ObjectInherit", "None", "Deny")))
+        $DirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "TakeOwnership", "ContainerInherit,ObjectInherit", "None", "Deny")))
+        # Authenticated Users: ReadAndExecute
+        $DirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidUsers, "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")))
+
+        Set-Acl -Path $InstallDir -AclObject $DirAcl
+
+        # Explicitly harden each file
+        Get-ChildItem -Path $InstallDir -File | ForEach-Object {
+            $FileAcl = Get-Acl -Path $_.FullName
+            $FileAcl.SetAccessRuleProtection($true, $false)
+            $FileAcl.Access | ForEach-Object { $FileAcl.RemoveAccessRule($_) | Out-Null }
+            $FileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidSystem, "FullControl", "None", "None", "Allow")))
+            $FileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "ReadAndExecute", "None", "None", "Allow")))
+            $FileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "Delete", "None", "None", "Deny")))
+            $FileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "ChangePermissions", "None", "None", "Deny")))
+            $FileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "TakeOwnership", "None", "None", "Deny")))
+            $FileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidUsers, "ReadAndExecute", "None", "None", "Allow")))
+            Set-Acl -Path $_.FullName -AclObject $FileAcl
+        }
+
+        Write-Log -Message "Installation directory and files locked. Owner=SYSTEM, Admins=ReadOnly+NoDelete." -Type "SUCCESS" -Color Green
+    } catch {
+        Write-Log -Message "Failed to harden NTFS permissions: $_" -Type "ERROR" -Color Red
+    }
 
     Write-Log -Message "INSTALLATION COMPLETE! System is permanently protected." -Type "SUCCESS" -Color Green
 
