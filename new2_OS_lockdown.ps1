@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Enterprise OS Child Lockdown + DNS Hijack Protection Suite (IPv4 & IPv6 + DoH)
 .DESCRIPTION
@@ -876,9 +876,9 @@ function Test-ParentPassword {
     $StoredHash = $null
     $StoredSalt = $null
     $StoredIterations = 100000
-    try { $StoredHash = (Get-ItemProperty -Path $IntegrityRegPath -Name $PwRegName -ErrorAction Stop).$PwRegName } catch {}
-    try { $StoredSalt = (Get-ItemProperty -Path $IntegrityRegPath -Name $SaltRegName -ErrorAction Stop).$SaltRegName } catch {}
-    try { $StoredIterations = (Get-ItemProperty -Path $IntegrityRegPath -Name $IterRegName -ErrorAction Stop).$IterRegName } catch {}
+    try { $StoredHash = (Get-ItemPropertyValue -Path $IntegrityRegPath -Name $PwRegName -ErrorAction Stop) } catch {}
+    try { $StoredSalt = (Get-ItemPropertyValue -Path $IntegrityRegPath -Name $SaltRegName -ErrorAction Stop) } catch {}
+    try { $StoredIterations = (Get-ItemPropertyValue -Path $IntegrityRegPath -Name $IterRegName -ErrorAction Stop) } catch {}
     if (-not $StoredHash -or -not $StoredSalt) {
         Write-Host "[ERROR] No Parent Mode password set. Run 'oslock -SetParentPassword' first." -ForegroundColor Red
         return $false
@@ -907,9 +907,9 @@ $RegPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WpnPlatform\Settings
 $Hash = $null
 $Salt = $null
 $Iterations = 100000
-try { $Hash = (Get-ItemProperty -Path $RegPath -Name "OSGuardParentPasswordHash" -ErrorAction Stop).OSGuardParentPasswordHash } catch {}
-try { $Salt = (Get-ItemProperty -Path $RegPath -Name "OSGuardParentPasswordSalt" -ErrorAction Stop).OSGuardParentPasswordSalt } catch {}
-try { $Iterations = (Get-ItemProperty -Path $RegPath -Name "OSGuardParentPasswordIterations" -ErrorAction Stop).OSGuardParentPasswordIterations } catch {}
+try { $Hash = (Get-ItemPropertyValue -Path $RegPath -Name "OSGuardParentPasswordHash" -ErrorAction Stop) } catch {}
+try { $Salt = (Get-ItemPropertyValue -Path $RegPath -Name "OSGuardParentPasswordSalt" -ErrorAction Stop) } catch {}
+try { $Iterations = (Get-ItemPropertyValue -Path $RegPath -Name "OSGuardParentPasswordIterations" -ErrorAction Stop) } catch {}
 if (-not $Hash -or -not $Salt) { exit }
 
 Add-Type -AssemblyName Microsoft.VisualBasic -ErrorAction SilentlyContinue
@@ -940,7 +940,7 @@ $FailureCount = 0
 while ($true) {
     Start-Sleep -Seconds 5
     try {
-        $Active = (Get-ItemProperty -Path $RegPath -Name "OSGuardParentModeActive" -ErrorAction Stop).OSGuardParentModeActive
+        $Active = (Get-ItemPropertyValue -Path $RegPath -Name "OSGuardParentModeActive" -ErrorAction Stop)
     } catch { $Active = 0 }
     if ($Active -ne 1) { break }
 
@@ -1634,9 +1634,9 @@ function Show-HealthCheck {
     $CurrentPath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
     if ($CurrentPath -notlike "*$InstallDir*") { $Drift.Add("PATH MISSING: $InstallDir") }
     # Check machine policies (sample)
-    $UacLUA = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "EnableLUA" -ErrorAction SilentlyContinue).EnableLUA
+    $UacLUA = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "EnableLUA" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "EnableLUA" -ErrorAction SilentlyContinue
     if ($UacLUA -ne 1) { $Drift.Add("UAC LUA NOT ENFORCED") }
-    $Store = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore" -Name "RemoveWindowsStore" -ErrorAction SilentlyContinue).RemoveWindowsStore
+    $Store = Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore" -Name "RemoveWindowsStore" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "RemoveWindowsStore" -ErrorAction SilentlyContinue
     if ($Store -ne 1) { $Drift.Add("STORE NOT REMOVED") }
     # Check child account
     if (-not (Get-ChildAccount)) { $Drift.Add("CHILD ACCOUNT MISSING: $ChildUser") }
@@ -1665,7 +1665,7 @@ function Export-OSGuardReport {
     $InstalledPrograms = Get-ChildInstallDirectories
     $TamperActive = Test-TamperDetected
     $LastTamper = "N/A"
-    try { $LastTamper = (Get-ItemProperty -Path $IntegrityRegPath -Name $TamperDetectedRegName -ErrorAction SilentlyContinue).$TamperDetectedRegName } catch {}
+    try { $LastTamper = Get-ItemProperty -Path $IntegrityRegPath -Name $TamperDetectedRegName -ErrorAction SilentlyContinue | Select-Object -ExpandProperty $TamperDetectedRegName -ErrorAction SilentlyContinue } catch {}
 
     $Report = [PSCustomObject]@{
         Timestamp         = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
@@ -2313,7 +2313,7 @@ function Invoke-ChildInstallReharden {
 
     # LOCKBACK: If Parent Mode is still active, force re-lock the system
     $ParentModeActive = $false
-    try { $ParentModeActive = (Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -ErrorAction SilentlyContinue).OSGuardParentModeActive -eq 1 } catch {}
+    try { $ParentModeActive = Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "OSGuardParentModeActive" -ErrorAction SilentlyContinue -eq 1 } catch {}
     if ($ParentModeActive) {
         Write-Log -Message "Lockback triggered: Install approval window expired. Re-locking system..." -Type "SECURITY" -Color Red
         try { Stop-WindowGuard } catch { Write-Log -Message "Stop-WindowGuard failed during lockback: $_" -Type "WARN" -Color Yellow }
@@ -2460,7 +2460,7 @@ function Enable-OSLock {
     New-ChildGameRequestShortcut
     # Skip re-creating Parent Mode shortcuts if Parent Mode is currently active
     $ParentModeActive = $false
-    try { $ParentModeActive = (Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -ErrorAction SilentlyContinue).OSGuardParentModeActive -eq 1 } catch {}
+    try { $ParentModeActive = Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "OSGuardParentModeActive" -ErrorAction SilentlyContinue -eq 1 } catch {}
     if (-not $ParentModeActive) { New-ParentModeShortcut }
     New-BrowserLauncher
     New-BrowserRequestShortcut
@@ -2479,7 +2479,7 @@ function Enable-OSLock {
     $FailedCount = 0
     foreach ($Policy in $MachinePolicies) {
         try {
-            $Val = (Get-ItemProperty -Path $Policy.Path -Name $Policy.Name -ErrorAction SilentlyContinue).$($Policy.Name)
+            $Val = Get-ItemProperty -Path $Policy.Path -Name $Policy.Name -ErrorAction SilentlyContinue | Select-Object -ExpandProperty $Policy.Name -ErrorAction SilentlyContinue
             if ($Val -ne $Policy.Value) { $FailedCount++; Write-Log -Message "Machine policy $($Policy.Name) not enforced (got $Val)." -Type "ERROR" -Color Red }
         } catch { $FailedCount++ }
     }
@@ -2871,9 +2871,9 @@ function Get-LockStatus {
 
         # Check machine policies (UAC + Store)
         $UacPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
-        $UacLUA = (Get-ItemProperty -Path $UacPath -Name "EnableLUA" -ErrorAction SilentlyContinue).EnableLUA
-        $UacAdmin = (Get-ItemProperty -Path $UacPath -Name "ConsentPromptBehaviorAdmin" -ErrorAction SilentlyContinue).ConsentPromptBehaviorAdmin
-        $StoreRemoved = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore" -Name "RemoveWindowsStore" -ErrorAction SilentlyContinue).RemoveWindowsStore
+        $UacLUA = Get-ItemProperty -Path $UacPath -Name "EnableLUA" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "EnableLUA" -ErrorAction SilentlyContinue
+        $UacAdmin = Get-ItemProperty -Path $UacPath -Name "ConsentPromptBehaviorAdmin" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "ConsentPromptBehaviorAdmin" -ErrorAction SilentlyContinue
+        $StoreRemoved = Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore" -Name "RemoveWindowsStore" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "RemoveWindowsStore" -ErrorAction SilentlyContinue
         if ($UacLUA -eq 1 -and $UacAdmin -eq 2) {
             Write-Host "  [X] UAC Maxed          -> ENFORCED (child cannot disable)" -ForegroundColor Red
         } else {
@@ -2889,7 +2889,7 @@ function Get-LockStatus {
 
         # Check Windows Installer block
         $MsiPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Installer"
-        $MsiDisabled = (Get-ItemProperty -Path $MsiPath -Name "DisableMSI" -ErrorAction SilentlyContinue).DisableMSI
+        $MsiDisabled = Get-ItemProperty -Path $MsiPath -Name "DisableMSI" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "DisableMSI" -ErrorAction SilentlyContinue
         if ($MsiDisabled -eq 2) {
             Write-Host "  [X] Windows Installer  -> BLOCKED for non-admin" -ForegroundColor Red
         } else {
@@ -2898,7 +2898,7 @@ function Get-LockStatus {
         }
 
         # Check USB storage
-        $UsbStart = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\USBSTOR" -Name "Start" -ErrorAction SilentlyContinue).Start
+        $UsbStart = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\USBSTOR" -Name "Start" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "Start" -ErrorAction SilentlyContinue
         if ($UsbStart -eq 4) {
             Write-Host "  [X] USB Storage        -> DISABLED (install from USB blocked)" -ForegroundColor Red
         } else {
@@ -2907,7 +2907,7 @@ function Get-LockStatus {
         }
 
         # Check Windows Script Host
-        $WshEnabled = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows Script Host\Settings" -Name "Enabled" -ErrorAction SilentlyContinue).Enabled
+        $WshEnabled = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows Script Host\Settings" -Name "Enabled" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "Enabled" -ErrorAction SilentlyContinue
         if ($WshEnabled -eq 0) {
             Write-Host "  [X] Windows Script Host -> DISABLED (wscript/cscript blocked)" -ForegroundColor Red
         } else {
@@ -2916,7 +2916,7 @@ function Get-LockStatus {
         }
 
         # Check SmartScreen
-        $SmartScreen = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "EnableSmartScreen" -ErrorAction SilentlyContinue).EnableSmartScreen
+        $SmartScreen = Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "EnableSmartScreen" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "EnableSmartScreen" -ErrorAction SilentlyContinue
         if ($SmartScreen -eq 1) {
             Write-Host "  [X] SmartScreen        -> ENFORCED (unknown apps blocked)" -ForegroundColor Red
         } else {
@@ -2925,7 +2925,7 @@ function Get-LockStatus {
         }
 
         # Check Fast User Switching
-        $FastSwitch = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "HideFastUserSwitching" -ErrorAction SilentlyContinue).HideFastUserSwitching
+        $FastSwitch = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "HideFastUserSwitching" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "HideFastUserSwitching" -ErrorAction SilentlyContinue
         if ($FastSwitch -eq 1) {
             Write-Host "  [X] Fast User Switching -> DISABLED (can't switch to admin)" -ForegroundColor Red
         } else {
@@ -2934,7 +2934,7 @@ function Get-LockStatus {
         }
 
         # Check Windows Update UI block
-        $WuBlocked = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" -Name "DisableWindowsUpdateAccess" -ErrorAction SilentlyContinue).DisableWindowsUpdateAccess
+        $WuBlocked = Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" -Name "DisableWindowsUpdateAccess" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "DisableWindowsUpdateAccess" -ErrorAction SilentlyContinue
         if ($WuBlocked -eq 1) {
             Write-Host "  [X] Windows Update UI  -> BLOCKED for standard users" -ForegroundColor Red
         } else {
@@ -2946,8 +2946,8 @@ function Get-LockStatus {
         $HiveMount = Mount-ChildHive
         if ($HiveMount) {
             $SamplePath = "Registry::HKEY_USERS\$HiveMount\Software\Microsoft\Windows\CurrentVersion\Policies\System"
-            $TaskMgrDisabled = (Get-ItemProperty -Path $SamplePath -Name "DisableTaskMgr" -ErrorAction SilentlyContinue).DisableTaskMgr
-            $RegDisabled = (Get-ItemProperty -Path $SamplePath -Name "DisableRegistryTools" -ErrorAction SilentlyContinue).DisableRegistryTools
+            $TaskMgrDisabled = Get-ItemProperty -Path $SamplePath -Name "DisableTaskMgr" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "DisableTaskMgr" -ErrorAction SilentlyContinue
+            $RegDisabled = Get-ItemProperty -Path $SamplePath -Name "DisableRegistryTools" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "DisableRegistryTools" -ErrorAction SilentlyContinue
             if ($TaskMgrDisabled -eq 1) {
                 Write-Host "  [X] TaskMgr/Regedit    -> DISABLED for child" -ForegroundColor Red
             } else {
@@ -2956,11 +2956,11 @@ function Get-LockStatus {
             }
 
             $ExplorerPath = "Registry::HKEY_USERS\$HiveMount\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer"
-            $NoCtx = (Get-ItemProperty -Path $ExplorerPath -Name "NoViewContextMenu" -ErrorAction SilentlyContinue).NoViewContextMenu
-            $NoFolder = (Get-ItemProperty -Path $ExplorerPath -Name "NoFolderOptions" -ErrorAction SilentlyContinue).NoFolderOptions
-            $NoTaskbar = (Get-ItemProperty -Path $ExplorerPath -Name "NoSetTaskbar" -ErrorAction SilentlyContinue).NoSetTaskbar
-            $NoAddPrinter = (Get-ItemProperty -Path $ExplorerPath -Name "NoAddPrinter" -ErrorAction SilentlyContinue).NoAddPrinter
-            $NoDelPrinter = (Get-ItemProperty -Path $ExplorerPath -Name "NoDeletePrinter" -ErrorAction SilentlyContinue).NoDeletePrinter
+            $NoCtx = Get-ItemProperty -Path $ExplorerPath -Name "NoViewContextMenu" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "NoViewContextMenu" -ErrorAction SilentlyContinue
+            $NoFolder = Get-ItemProperty -Path $ExplorerPath -Name "NoFolderOptions" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "NoFolderOptions" -ErrorAction SilentlyContinue
+            $NoTaskbar = Get-ItemProperty -Path $ExplorerPath -Name "NoSetTaskbar" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "NoSetTaskbar" -ErrorAction SilentlyContinue
+            $NoAddPrinter = Get-ItemProperty -Path $ExplorerPath -Name "NoAddPrinter" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "NoAddPrinter" -ErrorAction SilentlyContinue
+            $NoDelPrinter = Get-ItemProperty -Path $ExplorerPath -Name "NoDeletePrinter" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "NoDeletePrinter" -ErrorAction SilentlyContinue
 
             if ($NoCtx -eq 1) {
                 Write-Host "  [X] Right-Click Menu   -> DISABLED for child" -ForegroundColor Red
@@ -3028,7 +3028,7 @@ function Get-LockStatus {
     $TamperFlag = $false
     if (Test-Path $InstallScript) {
         $ExpectedHash = $null
-        try { $ExpectedHash = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WpnPlatform\Settings" -Name "OSGuardIntegrity" -ErrorAction Stop).OSGuardIntegrity } catch {}
+        try { $ExpectedHash = (Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WpnPlatform\Settings" -Name "OSGuardIntegrity" -ErrorAction Stop) } catch {}
         if (-not $ExpectedHash -and (Test-Path (Join-Path $InstallDir "integrity.sha256"))) {
             $ExpectedHash = Get-Content -Path (Join-Path $InstallDir "integrity.sha256") -Raw
         }
@@ -3057,7 +3057,7 @@ function Get-LockStatus {
     Write-Host " SCRIPT TAMPER DETECTION " -ForegroundColor White
     Write-Host "=====================================================" -ForegroundColor DarkGray
     $TamperLockoutActive = $false
-    try { $TamperLockoutActive = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WpnPlatform\Settings" -Name $TamperDetectedRegName -ErrorAction Stop).$TamperDetectedRegName -eq 1 } catch {}
+    try { $TamperLockoutActive = (Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WpnPlatform\Settings" -Name $TamperDetectedRegName -ErrorAction Stop) -eq 1 } catch {}
     if ($TamperLockoutActive) {
         Write-Host "  [X] Tamper Lockout      -> ACTIVE (Child session locked)" -ForegroundColor Red
         Write-Host "  >>> Child session is locked due to script tampering. <<<" -ForegroundColor Black -BackgroundColor Red
@@ -3270,7 +3270,7 @@ function Show-CategoryGrid {
     $IntegrityOk = $false
     if (Test-Path $InstallScript) {
         $ExpectedHash = $null
-        try { $ExpectedHash = (Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardIntegrity" -ErrorAction Stop).OSGuardIntegrity } catch {}
+        try { $ExpectedHash = (Get-ItemPropertyValue -Path $IntegrityRegPath -Name "OSGuardIntegrity" -ErrorAction Stop) } catch {}
         if (-not $ExpectedHash -and (Test-Path $IntegrityFile)) { $ExpectedHash = Get-Content -Path $IntegrityFile -Raw }
         if ($ExpectedHash) {
             $ActualHash = (Get-FileHash -Path $InstallScript -Algorithm SHA256).Hash
@@ -3281,7 +3281,7 @@ function Show-CategoryGrid {
 
     # --- Script Tamper Lockout ---
     $TamperFlag = $false
-    try { $TamperFlag = (Get-ItemProperty -Path $IntegrityRegPath -Name $TamperDetectedRegName -ErrorAction Stop).$TamperDetectedRegName -eq 1 } catch {}
+    try { $TamperFlag = (Get-ItemPropertyValue -Path $IntegrityRegPath -Name $TamperDetectedRegName -ErrorAction Stop) -eq 1 } catch {}
     $Categories["Script Tamper Lockout"] = $TamperFlag
 
     # --- Canary File ---
@@ -3301,7 +3301,7 @@ function Show-CategoryGrid {
 
     # --- Parent Mode Active ---
     $ParentModeActive = $false
-    try { $ParentModeActive = (Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -ErrorAction Stop).OSGuardParentModeActive -eq 1 } catch {}
+    try { $ParentModeActive = (Get-ItemPropertyValue -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -ErrorAction Stop) -eq 1 } catch {}
     $Categories["Parent Mode Active"] = $ParentModeActive
 
     # --- Child Logon Task ---
@@ -3440,7 +3440,7 @@ function Test-IntegrityStatus {
     $IntegrityFile = Join-Path $InstallDir "integrity.sha256"
     if (-not (Test-Path $InstallScript)) { return $null }
     $ExpectedHash = $null
-    try { $ExpectedHash = (Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardIntegrity" -ErrorAction Stop).OSGuardIntegrity } catch {}
+    try { $ExpectedHash = (Get-ItemPropertyValue -Path $IntegrityRegPath -Name "OSGuardIntegrity" -ErrorAction Stop) } catch {}
     if (-not $ExpectedHash -and (Test-Path $IntegrityFile)) { $ExpectedHash = Get-Content -Path $IntegrityFile -Raw }
     if (-not $ExpectedHash) { return $null }
     $ActualHash = (Get-FileHash -Path $InstallScript -Algorithm SHA256).Hash
@@ -3500,7 +3500,7 @@ function Test-TaskSchedulerTamper {
 
 function Test-TamperDetected {
     try {
-        return (Get-ItemProperty -Path $IntegrityRegPath -Name $TamperDetectedRegName -ErrorAction Stop).$TamperDetectedRegName -eq 1
+        return (Get-ItemPropertyValue -Path $IntegrityRegPath -Name $TamperDetectedRegName -ErrorAction Stop) -eq 1
     } catch { return $false }
 }
 
@@ -3619,9 +3619,9 @@ function Show-TamperLockoutScreen {
         }
         # Fallback to registry if file is missing (admin session)
         if (-not $StoredHash -or -not $StoredSalt) {
-            try { $StoredHash = (Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentPasswordHash" -ErrorAction Stop).OSGuardParentPasswordHash } catch {}
-            try { $StoredSalt = (Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentPasswordSalt" -ErrorAction Stop).OSGuardParentPasswordSalt } catch {}
-            try { $StoredIterations = (Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentPasswordIterations" -ErrorAction Stop).OSGuardParentPasswordIterations } catch {}
+            try { $StoredHash = (Get-ItemPropertyValue -Path $IntegrityRegPath -Name "OSGuardParentPasswordHash" -ErrorAction Stop) } catch {}
+            try { $StoredSalt = (Get-ItemPropertyValue -Path $IntegrityRegPath -Name "OSGuardParentPasswordSalt" -ErrorAction Stop) } catch {}
+            try { $StoredIterations = (Get-ItemPropertyValue -Path $IntegrityRegPath -Name "OSGuardParentPasswordIterations" -ErrorAction Stop) } catch {}
         }
         if ($StoredHash -and $StoredSalt) {
             # Inline PBKDF2 for the lockout screen (self-contained)
@@ -4274,7 +4274,7 @@ if ($SilentLock) {
 
     # Primary check: registry stored hash
     $ExpectedHash = $null
-    try { $ExpectedHash = (Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardIntegrity" -ErrorAction Stop).OSGuardIntegrity } catch {}
+    try { $ExpectedHash = (Get-ItemPropertyValue -Path $IntegrityRegPath -Name "OSGuardIntegrity" -ErrorAction Stop) } catch {}
 
     if ($ExpectedHash) {
         $ActualHash = (Get-FileHash -Path $InstallScript -Algorithm SHA256).Hash
@@ -4432,7 +4432,7 @@ if ($SilentLock) {
 
     # Only clear Parent Mode and re-apply locks if Parent Mode is NOT active
     $ParentModeActive = $false
-    try { $ParentModeActive = (Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -ErrorAction SilentlyContinue).OSGuardParentModeActive -eq 1 } catch {}
+    try { $ParentModeActive = Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "OSGuardParentModeActive" -ErrorAction SilentlyContinue -eq 1 } catch {}
     if (-not $ParentModeActive) {
         try {
             Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
