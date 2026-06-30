@@ -122,6 +122,23 @@ if (-not $Principal.IsInRole($Role)) {
     }
 }
 
+# Auto-enable ExecutionPolicy for CurrentUser when elevated (so the script and future runs work without manual intervention)
+if ($Principal.IsInRole($Role)) {
+    $CurrentPolicy = Get-ExecutionPolicy -Scope CurrentUser -ErrorAction SilentlyContinue
+    $PolicyNeedsChange = $false
+    if ($CurrentPolicy -eq 'Restricted' -or $CurrentPolicy -eq 'AllSigned' -or $CurrentPolicy -eq 'Undefined') {
+        $PolicyNeedsChange = $true
+    }
+    if ($PolicyNeedsChange) {
+        try {
+            Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force -ErrorAction Stop
+            Write-Log -Message "ExecutionPolicy auto-set to RemoteSigned for CurrentUser (was $CurrentPolicy)." -Type "INFO" -Color Green
+        } catch {
+            Write-Log -Message "Failed to auto-set ExecutionPolicy for CurrentUser: $_" -Type "WARN" -Color Yellow
+        }
+    }
+}
+
 # ============================================================================
 # 2. GLOBAL CONFIGURATION & PATHS
 # ============================================================================
@@ -3761,8 +3778,8 @@ function Install-Persistence {
     Write-Log -Message "Installing OS-Guard to System ($InstallDir)..." -Type "ACTION" -Color Yellow
 
     # 0. Installation Gate: Prevent overwriting existing installs
-    if (Test-Path $InstallDir) {
-        Write-Log -Message "Installation aborted: $InstallDir already exists." -Type "ERROR" -Color Red
+    if (Test-Path $InstallScript) {
+        Write-Log -Message "Installation aborted: $InstallScript already exists." -Type "ERROR" -Color Red
         Write-Host "[ERROR] OS-Guard is already installed. Uninstall first." -ForegroundColor Red
         return
     }
@@ -4680,7 +4697,7 @@ do {
     } else {
         Write-Host "[2] TEMPORARY UNLOCK (Restore Access)" -ForegroundColor Yellow
     }
-    if (-not (Test-Path $InstallDir)) {
+    if (-not (Test-Path $InstallScript)) {
         Write-Host "[3] INSTALL SERVICE (Auto-Heal & Create 'oslock' command)" -ForegroundColor Green
     }
     Write-Host "[4] UNINSTALL SERVICE (Remove background tasks & Unlock)" -ForegroundColor Red
@@ -4742,7 +4759,7 @@ do {
             if ($IntegrityStatus -eq $false) {
                 Write-Host "`n[BLOCKED] Option [3] is disabled because the script has been tampered with." -ForegroundColor Red -BackgroundColor Black
                 Write-Host "Use option [4] to uninstall, then reinstall from a clean source." -ForegroundColor Yellow
-            } elseif (Test-Path $InstallDir) {
+            } elseif (Test-Path $InstallScript) {
                 Write-Warning "OS-Guard is already installed. Option [3] is unavailable."
             } else {
                 Install-Persistence
