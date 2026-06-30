@@ -158,7 +158,10 @@ $LogFile = Join-Path -Path $InstallDir -ChildPath "OS_Lockdown_Enterprise.log"
 function Write-Log {
     param ([string]$Message, [string]$Type = "INFO", [ConsoleColor]$Color = "White")
     $TimeStamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    try { "[$TimeStamp] [$Type] $Message" | Out-File -FilePath $LogFile -Append -Encoding UTF8 -ErrorAction SilentlyContinue } catch {}
+    try {
+        if (-not (Test-Path $InstallDir)) { New-Item -ItemType Directory -Path $InstallDir -Force -ErrorAction SilentlyContinue | Out-Null }
+        "[$TimeStamp] [$Type] $Message" | Out-File -FilePath $LogFile -Append -Encoding UTF8 -ErrorAction Stop
+    } catch {}
 
     # Write to Windows Event Log for tamper-resistant auditing
     if ($Type -in @("SECURITY","ERROR","WARN","AUDIT","ACTION")) {
@@ -1684,9 +1687,15 @@ function Export-OSGuardReport {
         InstalledPrograms = ($InstalledPrograms -join ";")
         HomeNetwork       = (Test-HomeNetwork)
     }
-    $Report | Export-Csv -Path $OutputPath -NoTypeInformation -Force -Encoding UTF8
-    Write-Log -Message "Report exported to $OutputPath" -Type "INFO" -Color Gray
-    Write-Host "[INFO] Report exported to $OutputPath" -ForegroundColor Green
+    try {
+        if (-not (Test-Path $InstallDir)) { New-Item -ItemType Directory -Path $InstallDir -Force -ErrorAction SilentlyContinue | Out-Null }
+        $Report | Export-Csv -Path $OutputPath -NoTypeInformation -Force -Encoding UTF8
+        Write-Log -Message "Report exported to $OutputPath" -Type "INFO" -Color Gray
+        Write-Host "[INFO] Report exported to $OutputPath" -ForegroundColor Green
+    } catch {
+        Write-Log -Message "Failed to export report to $OutputPath`: $_" -Type "ERROR" -Color Red
+        Write-Host "[ERROR] Failed to export report: $_" -ForegroundColor Red
+    }
 }
 
 function Show-SetupWizard {
@@ -4561,6 +4570,7 @@ $form.Add_Shown({
 [void][System.Windows.Forms.Application]::EnableVisualStyles()
 [void]$form.ShowDialog()
 '@
+    if (-not (Test-Path $InstallDir)) { New-Item -ItemType Directory -Path $InstallDir -Force -ErrorAction SilentlyContinue | Out-Null }
     Set-Content -Path $TempUnlockTimerPath -Value $TimerContent -Encoding UTF8 -Force
 }
 
@@ -4570,6 +4580,7 @@ function Start-TempUnlockTimer {
     }
     Stop-TempUnlockTimer
     try {
+        if (-not (Test-Path $InstallDir)) { New-Item -ItemType Directory -Path $InstallDir -Force -ErrorAction SilentlyContinue | Out-Null }
         $Process = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$TempUnlockTimerPath`"" -WindowStyle Normal -PassThru
         $Process.Id | Out-File -FilePath $TempUnlockTimerPidFile -Encoding UTF8 -Force
     } catch {
