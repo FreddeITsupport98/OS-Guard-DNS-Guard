@@ -30,6 +30,11 @@ param (
     [switch]$Unlock,
     [switch]$SilentLock,
     [switch]$ChildLock,
+    [switch]$ParentMode,
+    [switch]$SetParentPassword,
+    [switch]$ChildGameRequest,
+    [switch]$ContinueParentMode,
+    [switch]$LockNow,
     [string]$ChildUser = "Child"
 )
 
@@ -41,12 +46,12 @@ param (
 $Principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 $Role = [Security.Principal.WindowsBuiltInRole]::Administrator
 if (-not $Principal.IsInRole($Role)) {
-    if ($Install -or $Uninstall -or $Lock -or $Unlock -or $SilentLock) {
+    if ($Install -or $Uninstall -or $Lock -or $Unlock -or $SilentLock -or $ParentMode -or $SetParentPassword -or $LockNow) {
         Write-Warning "CRITICAL: Administrative privileges required for CLI commands. Access Denied."
         return
     }
-    # ChildLock writes only to the current user's own HKCU, no elevation needed
-    if (-not $ChildLock) {
+    # ChildLock and ChildGameRequest write only to the current user's own HKCU, no elevation needed
+    if (-not $ChildLock -and -not $ChildGameRequest) {
         Write-Warning "Administrative privileges required. Attempting auto-elevation..."
         Start-Sleep -Seconds 1
         try {
@@ -61,6 +66,11 @@ if (-not $Principal.IsInRole($Role)) {
             if ($Unlock) { $ArgsString += " -Unlock" }
             if ($SilentLock) { $ArgsString += " -SilentLock" }
             if ($ChildLock) { $ArgsString += " -ChildLock" }
+            if ($ParentMode) { $ArgsString += " -ParentMode" }
+            if ($SetParentPassword) { $ArgsString += " -SetParentPassword" }
+            if ($ChildGameRequest) { $ArgsString += " -ChildGameRequest" }
+            if ($ContinueParentMode) { $ArgsString += " -ContinueParentMode" }
+            if ($LockNow) { $ArgsString += " -LockNow" }
             if ($ChildUser -ne "Child") { $ArgsString += " -ChildUser `"$ChildUser`"" }
 
             $ProcessInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" $ArgsString"
@@ -87,6 +97,8 @@ $Guardian1Name = "OSGuard-Guardian1"
 $Guardian2Name = "OSGuard-Guardian2"
 $ChildLogonTaskName = "OSGuard-ChildLogon"
 $WmiEventName = "OSGuardWmiHealth"
+$ParentModeWatchName = "OSGuard-ParentModeWatch"
+$IntegrityRegPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WpnPlatform\Settings"
 
 # Setup Auto-Logging
 $ScriptDir = Split-Path -Parent -Path $PSCommandPath
@@ -128,6 +140,7 @@ if (-not $Adapters) { $Adapters = Get-NetAdapter -ErrorAction SilentlyContinue }
 
 $SidAdmin = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-544")
 $SidSystem = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-18")
+$SidUsers = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-11")
 # Network UI restrictions are USER policies (HKCU)
 $GpoPath = "HKCU:\Software\Policies\Microsoft\Windows\Network Connections"
 
@@ -441,6 +454,286 @@ function Remove-ChildLogoutShortcut {
     }
 }
 
+function Harden-FileACL {
+    <#
+        Reusable ACL hardener for a single file (e.g., .lnk shortcuts).
+        SYSTEM = FullControl, Admins/Users = ReadAndExecute + Deny Delete/ChangePermissions/TakeOwnership.
+    #>
+    param([string]$FilePath)
+    if (-not (Test-Path $FilePath)) { return }
+    try {
+        $Acl = Get-Acl -Path $FilePath
+        $Acl.SetOwner($SidSystem)
+        $Acl.SetAccessRuleProtection($true, $false)
+        $Acl.Access | ForEach-Object { $Acl.RemoveAccessRule($_) | Out-Null }
+        $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidSystem, "FullControl", "None", "None", "Allow")))
+        $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "ReadAndExecute", "None", "None", "Allow")))
+        $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "Delete", "None", "None", "Deny")))
+        $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "ChangePermissions", "None", "None", "Deny")))
+        $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "TakeOwnership", "None", "None", "Deny")))
+        $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidUsers, "ReadAndExecute", "None", "None", "Allow")))
+        $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidUsers, "Delete", "None", "None", "Deny")))
+        $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidUsers, "ChangePermissions", "None", "None", "Deny")))
+        $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidUsers, "TakeOwnership", "None", "None", "Deny")))
+        Set-Acl -Path $FilePath -AclObject $Acl -ErrorAction SilentlyContinue
+    } catch {
+        Write-Log -Message "Failed to harden ACL for $FilePath`: $_" -Type "WARN" -Color Yellow
+    }
+}
+
+function Set-ParentPassword {
+    <#
+        Prompts the admin to set (or change) the Parent Mode password.
+        Stores a SHA256 hash in the protected registry key.
+    #>
+    $PwRegName = "OSGuardParentPasswordHash"
+    Write-Host "`n[SET PARENT MODE PASSWORD]" -ForegroundColor Cyan
+    $NewPw = Read-Host "Enter new Parent Mode password" -AsSecureString
+    $ConfirmPw = Read-Host "Confirm new Parent Mode password" -AsSecureString
+    $NewPlain = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($NewPw))
+    $ConfirmPlain = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($ConfirmPw))
+    if ($NewPlain -ne $ConfirmPlain) {
+        Write-Host "[ERROR] Passwords do not match. Password NOT changed." -ForegroundColor Red
+        return
+    }
+    if ($NewPlain.Length -lt 4) {
+        Write-Host "[ERROR] Password must be at least 4 characters." -ForegroundColor Red
+        return
+    }
+    $Hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($NewPlain))
+    $HashStr = ([System.BitConverter]::ToString($Hash) -replace "-", "").ToLower()
+    try {
+        if (-not (Test-Path $IntegrityRegPath)) { New-Item -Path $IntegrityRegPath -Force | Out-Null }
+        Set-ItemProperty -Path $IntegrityRegPath -Name $PwRegName -Value $HashStr -Type String -Force -ErrorAction Stop
+        # Harden the registry key so only SYSTEM can read the hash
+        $RegKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SOFTWARE\Microsoft\Windows\CurrentVersion\WpnPlatform\Settings", [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]::ChangePermissions)
+        if ($RegKey) {
+            $Acl = $RegKey.GetAccessControl()
+            $Acl.SetAccessRuleProtection($true, $false)
+            $Acl.Access | ForEach-Object { $Acl.RemoveAccessRule($_) | Out-Null }
+            $Acl.AddAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule($SidSystem, "FullControl", "Allow")))
+            $Acl.AddAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule($SidAdmin, "ReadKey", "Allow")))
+            $RegKey.SetAccessControl($Acl)
+            $RegKey.Close()
+        }
+        Write-Log -Message "Parent Mode password hash stored." -Type "SUCCESS" -Color Green
+        Write-Host "[SUCCESS] Parent Mode password updated." -ForegroundColor Green
+    } catch {
+        Write-Log -Message "Failed to store parent password hash: $_" -Type "ERROR" -Color Red
+        Write-Host "[ERROR] Could not store password hash." -ForegroundColor Red
+    }
+}
+
+function Test-ParentPassword {
+    <#
+        Prompts for the Parent Mode password and returns $true if correct.
+    #>
+    $PwRegName = "OSGuardParentPasswordHash"
+    $StoredHash = $null
+    try { $StoredHash = (Get-ItemProperty -Path $IntegrityRegPath -Name $PwRegName -ErrorAction Stop).$PwRegName } catch {}
+    if (-not $StoredHash) {
+        Write-Host "[ERROR] No Parent Mode password set. Run 'oslock -SetParentPassword' first." -ForegroundColor Red
+        return $false
+    }
+    $InputPw = Read-Host "Enter Parent Mode password" -AsSecureString
+    $InputPlain = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($InputPw))
+    $InputHash = [System.Security.Cryptography.SHA256]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($InputPlain))
+    $InputHashStr = ([System.BitConverter]::ToString($InputHash) -replace "-", "").ToLower()
+    if ($InputHashStr -eq $StoredHash) {
+        return $true
+    } else {
+        Write-Host "[ERROR] Incorrect password." -ForegroundColor Red
+        return $false
+    }
+}
+
+function Enter-ParentMode {
+    <#
+        Unlocks the system for the admin after password verification.
+        Sets a registry flag and timestamp so the AFK watcher can auto-lock.
+    #>
+    Write-Host "`n=====================================================" -ForegroundColor Cyan
+    Write-Host " ENTER PARENT MODE (ADMIN UNLOCK) " -ForegroundColor Cyan
+    Write-Host "=====================================================" -ForegroundColor Cyan
+
+    if (-not (Test-ParentPassword)) { return }
+
+    Write-Log -Message "Parent Mode activated by admin. Unlocking system..." -Type "ACTION" -Color Magenta
+
+    # Temporarily unlock everything
+    Disable-OSLock
+    Disable-DNSLock
+
+    # Remove child hive restrictions from live hive if child is currently logged in
+    foreach ($Policy in $ChildHivePolicies) {
+        $KeyPath = "HKCU:\$($Policy.SubPath)"
+        try { Remove-ItemProperty -Path $KeyPath -Name $Policy.Name -Force -ErrorAction SilentlyContinue } catch {}
+    }
+
+    # Set parent mode flag and timestamp
+    try {
+        if (-not (Test-Path $IntegrityRegPath)) { New-Item -Path $IntegrityRegPath -Force | Out-Null }
+        Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -Value 1 -Type DWord -Force -ErrorAction Stop
+        Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeTimestamp" -Value (Get-Date -Format "o") -Type String -Force -ErrorAction Stop
+    } catch {
+        Write-Log -Message "Failed to set parent mode flag: $_" -Type "ERROR" -Color Red
+    }
+
+    Write-Host "`n[PARENT MODE ACTIVE]" -ForegroundColor Green -BackgroundColor Black
+    Write-Host "  System is UNLOCKED. You can now install, modify settings, or view the child account." -ForegroundColor Green
+    Write-Host "  Auto-lock after 5 minutes of inactivity (AFK timer)." -ForegroundColor Yellow
+    Write-Host "  Click 'Lock Now' on the admin desktop or run 'oslock -LockNow' to re-lock immediately." -ForegroundColor Yellow
+    Write-Host "=====================================================" -ForegroundColor Cyan
+}
+
+function Exit-ParentMode {
+    <#
+        Re-locks everything and clears the parent mode flag.
+    #>
+    Write-Log -Message "Exiting Parent Mode and re-locking system..." -Type "ACTION" -Color Magenta
+    Enable-OSLock
+    Enable-DNSLock
+    try {
+        Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeTimestamp" -Value "" -Type String -Force -ErrorAction SilentlyContinue
+    } catch {}
+    Write-Log -Message "Parent Mode ended. System re-locked." -Type "SUCCESS" -Color Green
+    Write-Host "[LOCKED] System is secured again." -ForegroundColor Green
+}
+
+function New-ParentModeShortcut {
+    <#
+        Creates Parent Mode, Lock Now, and Continue shortcuts on the admin desktop.
+    #>
+    $AdminProfile = $env:USERPROFILE
+    $AdminDesktop = Join-Path $AdminProfile "Desktop"
+    if (-not (Test-Path $AdminDesktop)) { New-Item -ItemType Directory -Path $AdminDesktop -Force -ErrorAction SilentlyContinue | Out-Null }
+
+    $Shortcuts = @(
+        @{ Name = "Parent Mode.lnk"; Args = "-ParentMode"; Icon = "shell32.dll,48"; Desc = "Enter Parent Mode (unlock system)" },
+        @{ Name = "Lock Now.lnk"; Args = "-LockNow"; Icon = "shell32.dll,47"; Desc = "Immediately re-lock the system" },
+        @{ Name = "Continue Parent Mode.lnk"; Args = "-ContinueParentMode"; Icon = "shell32.dll,45"; Desc = "Reset AFK timer while in Parent Mode" }
+    )
+
+    foreach ($Sc in $Shortcuts) {
+        $Path = Join-Path $AdminDesktop $Sc.Name
+        try {
+            $Wsh = New-Object -ComObject WScript.Shell
+            $Lnk = $Wsh.CreateShortcut($Path)
+            $Lnk.TargetPath = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+            $Lnk.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$InstallScript`" $($Sc.Args)"
+            $Lnk.Description = $Sc.Desc
+            $Lnk.IconLocation = $Sc.Icon
+            $Lnk.Save()
+            $bytes = [System.IO.File]::ReadAllBytes($Path)
+            $bytes[0x15] = $bytes[0x15] -bor 0x20
+            [System.IO.File]::WriteAllBytes($Path, $bytes)
+            Harden-FileACL -FilePath $Path
+            Write-Log -Message "Created admin shortcut: $($Sc.Name)" -Type "INFO" -Color Gray
+        } catch {
+            Write-Log -Message "Failed to create admin shortcut $($Sc.Name): $_" -Type "WARN" -Color Yellow
+        }
+    }
+}
+
+function Remove-ParentModeShortcut {
+    $AdminProfile = $env:USERPROFILE
+    $AdminDesktop = Join-Path $AdminProfile "Desktop"
+    foreach ($Name in @("Parent Mode.lnk", "Lock Now.lnk", "Continue Parent Mode.lnk")) {
+        $Path = Join-Path $AdminDesktop $Name
+        if (Test-Path $Path) {
+            # Relax ACL first so we can delete it
+            try {
+                $Acl = Get-Acl -Path $Path
+                $Acl.SetAccessRuleProtection($false, $false)
+                Set-Acl -Path $Path -AclObject $Acl -ErrorAction SilentlyContinue
+            } catch {}
+            Remove-Item -Path $Path -Force -ErrorAction SilentlyContinue
+            Write-Log -Message "Removed admin shortcut: $Name" -Type "INFO" -Color Gray
+        }
+    }
+}
+
+function New-ChildGameRequestShortcut {
+    <#
+        Creates a "Request Game Install" shortcut on the child's desktop.
+        The shortcut is ACL-hardened so the child cannot delete or modify it.
+    #>
+    $ChildProfilePath = $null
+    try {
+        $ChildProfile = Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue | Where-Object { $_.LocalPath -like "*\$ChildUser" } | Select-Object -First 1
+        if ($ChildProfile) { $ChildProfilePath = $ChildProfile.LocalPath }
+    } catch {}
+    if (-not $ChildProfilePath) { $ChildProfilePath = "C:\Users\$ChildUser" }
+    $DesktopPath = Join-Path $ChildProfilePath "Desktop"
+    if (-not (Test-Path $DesktopPath)) { New-Item -ItemType Directory -Path $DesktopPath -Force -ErrorAction SilentlyContinue | Out-Null }
+    $ShortcutPath = Join-Path $DesktopPath "Request Game Install.lnk"
+    try {
+        $Wsh = New-Object -ComObject WScript.Shell
+        $Lnk = $Wsh.CreateShortcut($ShortcutPath)
+        $Lnk.TargetPath = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        $Lnk.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$InstallScript`" -ChildGameRequest -ChildUser `"$ChildUser`""
+        $Lnk.Description = "Request a game installation (requires admin approval)"
+        $Lnk.IconLocation = "shell32.dll,15"
+        $Lnk.Save()
+        $bytes = [System.IO.File]::ReadAllBytes($ShortcutPath)
+        $bytes[0x15] = $bytes[0x15] -bor 0x20
+        [System.IO.File]::WriteAllBytes($ShortcutPath, $bytes)
+        Harden-FileACL -FilePath $ShortcutPath
+        Write-Log -Message "Created child game request shortcut at '$ShortcutPath'." -Type "INFO" -Color Gray
+    } catch {
+        Write-Log -Message "Failed to create child game request shortcut: $_" -Type "WARN" -Color Yellow
+    }
+}
+
+function Remove-ChildGameRequestShortcut {
+    $ChildProfilePath = $null
+    try {
+        $ChildProfile = Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue | Where-Object { $_.LocalPath -like "*\$ChildUser" } | Select-Object -First 1
+        if ($ChildProfile) { $ChildProfilePath = $ChildProfile.LocalPath }
+    } catch {}
+    if (-not $ChildProfilePath) { $ChildProfilePath = "C:\Users\$ChildUser" }
+    $Path = Join-Path $ChildProfilePath "Desktop\Request Game Install.lnk"
+    if (Test-Path $Path) {
+        try {
+            $Acl = Get-Acl -Path $Path
+            $Acl.SetAccessRuleProtection($false, $false)
+            Set-Acl -Path $Path -AclObject $Acl -ErrorAction SilentlyContinue
+        } catch {}
+        Remove-Item -Path $Path -Force -ErrorAction SilentlyContinue
+        Write-Log -Message "Removed child game request shortcut." -Type "INFO" -Color Gray
+    }
+}
+
+function Show-GameRequestDialog {
+    <#
+        Displays a simple input dialog for the child to request a game.
+        Writes the request to a protected file in $InstallDir\Requests.
+    #>
+    Add-Type -AssemblyName Microsoft.VisualBasic -ErrorAction SilentlyContinue
+    $GameName = [Microsoft.VisualBasic.Interaction]::InputBox("Enter the game name you want to install:`n(Admin will review and approve)", "Game Install Request", "", -1, -1)
+    if ([string]::IsNullOrWhiteSpace($GameName)) { return }
+    $RequestDir = Join-Path $InstallDir "Requests"
+    if (-not (Test-Path $RequestDir)) { New-Item -ItemType Directory -Path $RequestDir -Force -ErrorAction SilentlyContinue | Out-Null }
+    $RequestFile = Join-Path $RequestDir "request_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $Content = @"
+Game Install Request
+--------------------
+From user: $ChildUser
+Timestamp: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+Game name: $GameName
+
+This request was submitted by the child user and requires administrator approval.
+"@
+    try {
+        Set-Content -Path $RequestFile -Value $Content -Encoding UTF8 -Force -ErrorAction Stop
+        Write-Log -Message "Game request saved to '$RequestFile'." -Type "INFO" -Color Gray
+        [System.Windows.Forms.MessageBox]::Show("Your request for '$GameName' has been submitted to the administrator.`n`nThe admin will review and install it if approved.", "Request Sent", "OK", "Information") | Out-Null
+    } catch {
+        Write-Log -Message "Failed to save game request: $_" -Type "ERROR" -Color Red
+    }
+}
+
 function Apply-MachinePolicies {
     Write-Log -Message "Applying machine-wide OS policies (UAC max, Store block, Installer block, USB disable, SmartScreen, Fast User Switching)..." -Type "INFO" -Color Yellow
     foreach ($Policy in $MachinePolicies) {
@@ -515,6 +808,8 @@ function Enable-OSLock {
     net user $ChildUser /passwordreq:no 2>&1 | Out-Null
 
     Set-ChildLogoutShortcut
+    New-ChildGameRequestShortcut
+    New-ParentModeShortcut
 
     Write-Log -Message "OS Child Lockdown deployed." -Type "SUCCESS" -Color Green
 
@@ -1465,6 +1760,72 @@ function Install-Persistence {
     Enable-DNSLock
     Enable-OSLock
     Set-ChildLogoutShortcut
+    New-ChildGameRequestShortcut
+    New-ParentModeShortcut
+
+    # 7. Set default Parent Mode password and create requests directory
+    Write-Log -Message "Setting default Parent Mode password and creating requests directory..." -Type "INFO" -Color Yellow
+    $DefaultPw = "admin123"
+    $Hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($DefaultPw))
+    $HashStr = ([System.BitConverter]::ToString($Hash) -replace "-", "").ToLower()
+    try {
+        if (-not (Test-Path $IntegrityRegPath)) { New-Item -Path $IntegrityRegPath -Force | Out-Null }
+        Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentPasswordHash" -Value $HashStr -Type String -Force -ErrorAction Stop
+        Write-Log -Message "Default Parent Mode password set (change it with 'oslock -SetParentPassword')." -Type "INFO" -Color Gray
+    } catch {
+        Write-Log -Message "Failed to set default Parent Mode password: $_" -Type "WARN" -Color Yellow
+    }
+    $RequestDir = Join-Path $InstallDir "Requests"
+    if (-not (Test-Path $RequestDir)) { New-Item -ItemType Directory -Path $RequestDir -Force -ErrorAction SilentlyContinue | Out-Null }
+    try {
+        $RequestsDirAcl = Get-Acl -Path $RequestDir
+        $RequestsDirAcl.SetOwner($SidSystem)
+        $RequestsDirAcl.SetAccessRuleProtection($true, $false)
+        $RequestsDirAcl.Access | ForEach-Object { $RequestsDirAcl.RemoveAccessRule($_) | Out-Null }
+        $RequestsDirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidSystem, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")))
+        $RequestsDirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")))
+        $RequestsDirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdmin, "DeleteSubdirectoriesAndFiles", "ContainerInherit,ObjectInherit", "None", "Deny")))
+        $RequestsDirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidUsers, "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")))
+        Set-Acl -Path $RequestDir -AclObject $RequestsDirAcl -ErrorAction Stop
+    } catch {
+        Write-Log -Message "Failed to harden Requests directory ACL: $_" -Type "WARN" -Color Yellow
+    }
+
+    # 8. Register Parent Mode AFK Watcher (1-minute dead man's switch)
+    Write-Log -Message "Registering Parent Mode AFK watcher (1-minute heartbeat) ..." -Type "INFO" -Color Yellow
+    $WatchScriptPath = Join-Path $InstallDir "ParentModeWatch.ps1"
+    $WatchScriptContent = '
+$RegPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WpnPlatform\Settings"
+$Active = (Get-ItemProperty -Path $RegPath -Name "OSGuardParentModeActive" -ErrorAction SilentlyContinue).OSGuardParentModeActive
+if ($Active -ne 1) { return }
+
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class IdleTime {
+    [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+    [StructLayout(LayoutKind.Sequential)] struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
+    public static uint GetIdleTime() {
+        LASTINPUTINFO lii = new LASTINPUTINFO(); lii.cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO));
+        GetLastInputInfo(ref lii);
+        return (uint)Environment.TickCount - lii.dwTime;
+    }
+}
+"@
+
+$IdleMs = [IdleTime]::GetIdleTime()
+$Timeout = 5 * 60 * 1000
+if ($IdleMs -gt $Timeout) {
+    & "C:\Windows\oslock.cmd" -LockNow
+}
+'
+    Set-Content -Path $WatchScriptPath -Value $WatchScriptContent -Encoding UTF8 -Force
+    $WatchAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$WatchScriptPath`""
+    $WatchTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 9999)
+    $WatchPrincipal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+    Register-ScheduledTask -TaskName $ParentModeWatchName -Action $WatchAction -Trigger $WatchTrigger -Principal $WatchPrincipal -Force | Out-Null
+    Write-Log -Message "Parent Mode AFK watcher registered (1-minute heartbeat, 5-minute idle timeout)." -Type "INFO" -Color Gray
+
     Write-Log -Message "INSTALLATION COMPLETE! System is permanently protected." -Type "SUCCESS" -Color Green
 
     # Final status verification
@@ -1486,6 +1847,14 @@ function Install-Persistence {
     } catch {}
     if (-not $ChildProfilePath) { $ChildProfilePath = "C:\Users\$ChildUser" }
     if (-not (Test-Path (Join-Path $ChildProfilePath "Desktop\Log out.lnk"))) { $FailedCount++; Write-Log -Message "Logout shortcut for '$ChildUser' not found." -Type "ERROR" -Color Red }
+    if (-not (Test-Path (Join-Path $ChildProfilePath "Desktop\Request Game Install.lnk"))) { $FailedCount++; Write-Log -Message "Game request shortcut for '$ChildUser' not found." -Type "ERROR" -Color Red }
+    $AdminProfile = $env:USERPROFILE
+    $AdminDesktop = Join-Path $AdminProfile "Desktop"
+    if (-not (Test-Path (Join-Path $AdminDesktop "Parent Mode.lnk"))) { $FailedCount++; Write-Log -Message "Parent Mode shortcut not found on admin desktop." -Type "ERROR" -Color Red }
+    if (-not (Test-Path (Join-Path $AdminDesktop "Lock Now.lnk"))) { $FailedCount++; Write-Log -Message "Lock Now shortcut not found on admin desktop." -Type "ERROR" -Color Red }
+    if (-not (Test-Path (Join-Path $AdminDesktop "Continue Parent Mode.lnk"))) { $FailedCount++; Write-Log -Message "Continue Parent Mode shortcut not found on admin desktop." -Type "ERROR" -Color Red }
+    if (-not (Get-ScheduledTask -TaskName $ParentModeWatchName -ErrorAction SilentlyContinue)) { $FailedCount++; Write-Log -Message "Parent Mode watch task $ParentModeWatchName missing." -Type "ERROR" -Color Red }
+    if (-not (Test-Path (Join-Path $InstallDir "Requests"))) { $FailedCount++; Write-Log -Message "Requests directory missing." -Type "ERROR" -Color Red }
     if ($FailedCount -eq 0) {
         Write-Host "[SUCCESS] INSTALLATION COMPLETE!" -ForegroundColor Green
     } else {
@@ -1554,9 +1923,11 @@ function Uninstall-Persistence {
     Disable-DNSLock
     Disable-OSLock
     Remove-ChildLogoutShortcut
+    Remove-ChildGameRequestShortcut
+    Remove-ParentModeShortcut
 
-    # Remove the Scheduled Tasks (including guardians and child logon)
-    foreach ($TName in @($TaskName, $Guardian1Name, $Guardian2Name, $ChildLogonTaskName)) {
+    # Remove the Scheduled Tasks (including guardians, child logon, and parent mode watch)
+    foreach ($TName in @($TaskName, $Guardian1Name, $Guardian2Name, $ChildLogonTaskName, $ParentModeWatchName)) {
         if (Get-ScheduledTask -TaskName $TName -ErrorAction SilentlyContinue) {
             Unregister-ScheduledTask -TaskName $TName -Confirm:$false | Out-Null
             Write-Log -Message "Removed task: $TName" -Type "INFO" -Color Gray
@@ -1571,10 +1942,13 @@ function Uninstall-Persistence {
         Get-WmiObject -Class __FilterToConsumerBinding -Namespace "root\subscription" -Filter "__PATH LIKE '%$WmiEventName%'" -ErrorAction SilentlyContinue | Remove-WmiObject -ErrorAction SilentlyContinue
     } catch { Write-Log -Message "Failed to remove WMI subscription: $_" -Type "WARN" -Color Yellow }
 
-    # Remove the integrity hash registry key
+    # Remove the integrity hash and parent password registry keys
     $IntegrityRegPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WpnPlatform\Settings"
     if (Test-Path $IntegrityRegPath) {
         Remove-ItemProperty -Path $IntegrityRegPath -Name "OSGuardIntegrity" -ErrorAction SilentlyContinue
+        Remove-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentPasswordHash" -ErrorAction SilentlyContinue
+        Remove-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -ErrorAction SilentlyContinue
+        Remove-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeTimestamp" -ErrorAction SilentlyContinue
     }
 
     # Remove Global CLI Command (relax ACL first) - then delete via SYSTEM helper if needed
@@ -1641,6 +2015,7 @@ function Uninstall-Persistence {
     if (Get-ScheduledTask -TaskName $Guardian1Name -ErrorAction SilentlyContinue) { $FailedCount++; Write-Log -Message "Task $Guardian1Name still exists." -Type "ERROR" -Color Red }
     if (Get-ScheduledTask -TaskName $Guardian2Name -ErrorAction SilentlyContinue) { $FailedCount++; Write-Log -Message "Task $Guardian2Name still exists." -Type "ERROR" -Color Red }
     if (Get-ScheduledTask -TaskName $ChildLogonTaskName -ErrorAction SilentlyContinue) { $FailedCount++; Write-Log -Message "Task $ChildLogonTaskName still exists." -Type "ERROR" -Color Red }
+    if (Get-ScheduledTask -TaskName $ParentModeWatchName -ErrorAction SilentlyContinue) { $FailedCount++; Write-Log -Message "Task $ParentModeWatchName still exists." -Type "ERROR" -Color Red }
     if (Test-Path $InstallDir) { $FailedCount++; Write-Log -Message "Install directory $InstallDir still exists." -Type "ERROR" -Color Red }
     if (Test-Path $CmdPath) { $FailedCount++; Write-Log -Message "Global CLI $CmdPath still exists." -Type "ERROR" -Color Red }
     $CurrentPath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
@@ -1733,6 +2108,22 @@ if ($SilentLock) {
         } catch {}
     }
 
+    # Re-apply the parent mode watch task if missing
+    if (-not (Get-ScheduledTask -TaskName $ParentModeWatchName -ErrorAction SilentlyContinue)) {
+        try {
+            $WatchScriptPath = Join-Path $InstallDir "ParentModeWatch.ps1"
+            $WatchAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$WatchScriptPath`""
+            $WatchTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 9999)
+            $WatchPrincipal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+            Register-ScheduledTask -TaskName $ParentModeWatchName -Action $WatchAction -Trigger $WatchTrigger -Principal $WatchPrincipal -Force | Out-Null
+        } catch {}
+    }
+
+    # Ensure parent mode flag is cleared (defense: never leave unlocked after a silent heal)
+    try {
+        Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+    } catch {}
+
     Enable-DNSLock
     Enable-OSLock
     return
@@ -1741,6 +2132,19 @@ if ($SilentLock) {
 if ($Lock)       { Enable-DNSLock; Enable-OSLock; return }
 if ($Unlock)     { Disable-DNSLock; Disable-OSLock; return }
 if ($Install)    { Install-Persistence; return }
+if ($ParentMode) { Enter-ParentMode; return }
+if ($SetParentPassword) { Set-ParentPassword; return }
+if ($ChildGameRequest) { Show-GameRequestDialog; return }
+if ($ContinueParentMode) {
+    try {
+        Set-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeTimestamp" -Value (Get-Date -Format "o") -Type String -Force -ErrorAction Stop
+        Write-Log -Message "Parent Mode AFK timer reset by admin." -Type "INFO" -Color Green
+    } catch {
+        Write-Log -Message "Failed to reset Parent Mode AFK timer: $_" -Type "ERROR" -Color Red
+    }
+    return
+}
+if ($LockNow)    { Exit-ParentMode; return }
 if ($Uninstall) {
     $CurrentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     $CurrentUserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
@@ -1776,9 +2180,11 @@ do {
     Write-Host "[4] UNINSTALL SERVICE (Remove background tasks & Unlock)" -ForegroundColor Red
     Write-Host "[5] REFRESH SYSTEM STATUS" -ForegroundColor Gray
     Write-Host "[6] EXIT TERMINAL" -ForegroundColor Gray
+    Write-Host "[7] ENTER PARENT MODE (Unlock with password)" -ForegroundColor Green
+    Write-Host "[8] LOCK NOW (Re-lock immediately)" -ForegroundColor Cyan
     Write-Host "-----------------------------------------------------"
 
-    $Choice = Read-Host "Select an administrative action (1-6)"
+    $Choice = Read-Host "Select an administrative action (1-8)"
     $IntegrityStatus = Test-IntegrityStatus
 
     switch ($Choice) {
@@ -1816,6 +2222,24 @@ do {
         "4" { Uninstall-Persistence; Write-Host "`n[ PRESS ANY KEY TO RETURN TO MENU ]" -ForegroundColor DarkGray; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") }
         "5" { Start-Sleep -Milliseconds 200 }
         "6" { Write-Host "Returning to terminal..." -ForegroundColor DarkGray; Start-Sleep -Milliseconds 500; break }
+        "7" {
+            if ($IntegrityStatus -eq $false) {
+                Write-Host "`n[BLOCKED] Option [7] is disabled because the script has been tampered with." -ForegroundColor Red -BackgroundColor Black
+                Write-Host "Use option [4] to uninstall, then reinstall from a clean source." -ForegroundColor Yellow
+            } else {
+                Enter-ParentMode
+            }
+            Write-Host "`n[ PRESS ANY KEY TO RETURN TO MENU ]" -ForegroundColor DarkGray; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        }
+        "8" {
+            if ($IntegrityStatus -eq $false) {
+                Write-Host "`n[BLOCKED] Option [8] is disabled because the script has been tampered with." -ForegroundColor Red -BackgroundColor Black
+                Write-Host "Use option [4] to uninstall, then reinstall from a clean source." -ForegroundColor Yellow
+            } else {
+                Exit-ParentMode
+            }
+            Write-Host "`n[ PRESS ANY KEY TO RETURN TO MENU ]" -ForegroundColor DarkGray; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        }
         default { Write-Warning "Invalid Selection."; Start-Sleep -Seconds 1 }
     }
 } while ($Choice -ne "6")

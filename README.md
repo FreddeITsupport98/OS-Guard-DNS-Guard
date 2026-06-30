@@ -1,4 +1,4 @@
-# OS-Guard + DNS-Guard
+﻿# OS-Guard + DNS-Guard
 
 Enterprise **OS Child Lockdown** + **DNS Hijack Protection** & Installer Suite (IPv4 & IPv6 + DoH)
 
@@ -60,6 +60,10 @@ Built-in Administrator retains full privileges to install, modify, and unlock.
 | **Child Hive Mount** | Loads `NTUSER.DAT` offline to enforce per-user policies even when the child is not logged in |
 | **Admin-Approval Logout Shortcut** | Creates a `Log out` shortcut on the child's desktop flagged to run as administrator, so the child cannot log out without admin UAC approval |
 | **Category Status Grid** | Interactive TUI shows a two-column grid of all 25+ lock categories with [ENABLED] / [DISABLED] / [UNKNOWN] indicators at a glance |
+| **Parent Mode** | Admin enters a password-protected temporary unlock mode to install software or view the child account. Auto-relocks after 5 minutes of inactivity (AFK watcher). |
+| **Game Request Shortcut** | Child has a "Request Game Install" shortcut on the desktop that opens a simple dialog to type a game name and send it to the admin. |
+| **Lock Now / Continue Parent Mode** | Admin desktop shortcuts allow instant re-locking or resetting the AFK timer without opening the terminal. |
+| **Parent Mode AFK Watcher** | 1-minute heartbeat scheduled task monitors idle time; if idle exceeds 5 minutes while parent mode is active, it auto-triggers `oslock -LockNow`. |
 
 ---
 
@@ -173,6 +177,11 @@ After installation, the global `oslock` command is available from any terminal:
 | `-SilentLock` | Background re-apply (used by tasks) | SYSTEM |
 | `-ChildLock` | Apply HKCU restrictions in child session | Child user (auto) |
 | `-ChildUser <name>` | Specify a custom child username | Admin |
+| `-ParentMode` | Enter password-protected Parent Mode (temporary unlock) | Admin |
+| `-SetParentPassword` | Interactively set the Parent Mode password | Admin |
+| `-ChildGameRequest` | Open the child game request dialog | Child (auto) |
+| `-ContinueParentMode` | Reset the AFK timer while in Parent Mode | Admin |
+| `-LockNow` | Exit Parent Mode and re-lock immediately | Admin |
 
 **Uninstall from a SYSTEM shell:**
 
@@ -215,11 +224,13 @@ Running the script without flags opens the live menu:
 -----------------------------------------------------
 [1] DEPLOY LOCK (Secure All Active Adapters)
 [2] REMOVE LOCK (Aangra / Restore Access)
-[4] UNINSTALL SERVICE (Remove background tasks & Unlock)
-[5] REFRESH SYSTEM STATUS
-[6] EXIT TERMINAL
-|-----------------------------------------------------
-Select an administrative action (1-6):
+|[4] UNINSTALL SERVICE (Remove background tasks & Unlock)
+|[5] REFRESH SYSTEM STATUS
+|[6] EXIT TERMINAL
+|[7] ENTER PARENT MODE (Unlock with password)
+|[8] LOCK NOW (Re-lock immediately)
+|-----------------------------------------------------|
+Select an administrative action (1-8):
 ```
 
 - Option `[3]` is hidden when already installed.

@@ -193,9 +193,29 @@ $TaskName = "OS-Guard-Protection"
 $Guardian1 = "OSGuard-Guardian1"
 $Guardian2 = "OSGuard-Guardian2"
 $ChildLogon = "OSGuard-ChildLogon"
+$ParentModeWatch = "OSGuard-ParentModeWatch"
 Assert-True -Name "Task_MainExists" -Condition ([bool](Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) -Detail "Task $TaskName missing"
 Assert-True -Name "Task_Guardian1Exists" -Condition ([bool](Get-ScheduledTask -TaskName $Guardian1 -ErrorAction SilentlyContinue)) -Detail "Task $Guardian1 missing"
 Assert-True -Name "Task_Guardian2Exists" -Condition ([bool](Get-ScheduledTask -TaskName $Guardian2 -ErrorAction SilentlyContinue)) -Detail "Task $Guardian2 missing"
+Assert-True -Name "Task_ParentModeWatchExists" -Condition ([bool](Get-ScheduledTask -TaskName $ParentModeWatch -ErrorAction SilentlyContinue)) -Detail "Task $ParentModeWatch missing"
+
+# --- 8. Parent Mode Artifacts ---
+$AdminProfile = $env:USERPROFILE
+$AdminDesktop = Join-Path $AdminProfile "Desktop"
+Assert-True -Name "ParentModeShortcut_Exists" -Condition (Test-Path (Join-Path $AdminDesktop "Parent Mode.lnk")) -Detail "Parent Mode.lnk missing on admin desktop"
+Assert-True -Name "LockNowShortcut_Exists" -Condition (Test-Path (Join-Path $AdminDesktop "Lock Now.lnk")) -Detail "Lock Now.lnk missing on admin desktop"
+Assert-True -Name "ContinueParentModeShortcut_Exists" -Condition (Test-Path (Join-Path $AdminDesktop "Continue Parent Mode.lnk")) -Detail "Continue Parent Mode.lnk missing on admin desktop"
+
+$RequestDir = Join-Path "C:\ProgramData\OSGuard" "Requests"
+Assert-True -Name "RequestsDir_Exists" -Condition (Test-Path $RequestDir) -Detail "Requests directory missing at $RequestDir"
+
+$IntegrityRegPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WpnPlatform\Settings"
+$ParentHash = (Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentPasswordHash" -ErrorAction SilentlyContinue).OSGuardParentPasswordHash
+Assert-True -Name "ParentPasswordHash_Set" -Condition ($null -ne $ParentHash -and $ParentHash.Length -eq 64) -Detail "Parent password hash not set or wrong length"
+
+$ParentModeActive = (Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardParentModeActive" -ErrorAction SilentlyContinue).OSGuardParentModeActive
+$IsLocked = ($ParentModeActive -eq 0 -or $null -eq $ParentModeActive)
+Assert-True -Name "ParentMode_NotActive" -Condition $IsLocked -Detail "ParentModeActive = $ParentModeActive (should be 0 or unset when not in use)"
 
 # --- FAIL SUMMARY ---
 Write-Host "`n=====================================================" -ForegroundColor DarkGray
