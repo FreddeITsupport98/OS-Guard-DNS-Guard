@@ -55,9 +55,11 @@ Built-in Administrator retains full privileges to install, modify, and unlock.
 | **Integrity Hash** | SHA256 stored in a misleading registry key (`WpnPlatform\Settings\OSGuardIntegrity`) plus a file backup |
 | **Global CLI** | After install, type `oslock` from any terminal to run commands |
 | **Menu Tamper Blocking** | If the installed script is modified, options `[1]`, `[2]`, and `[3]` are blocked; only uninstall remains available |
-| **OS Child Lockdown** | Auto-creates passwordless `Child` standard user; disables TaskMgr, Regedit, CMD, Run, Control Panel, Store, UAC modification |
+| **OS Child Lockdown** | Auto-creates passwordless `Child` standard user; disables TaskMgr, Regedit, CMD, Run, Control Panel, Store, UAC modification, Installer, USB, WSH, SmartScreen, Fast User Switching |
 | **Child Logon Task** | Applies HKCU restrictions directly in the child's session at every logon |
 | **Child Hive Mount** | Loads `NTUSER.DAT` offline to enforce per-user policies even when the child is not logged in |
+| **Admin-Approval Logout Shortcut** | Creates a `Log out` shortcut on the child's desktop flagged to run as administrator, so the child cannot log out without admin UAC approval |
+| **Category Status Grid** | Interactive TUI shows a two-column grid of all 25+ lock categories with [ENABLED] / [DISABLED] / [UNKNOWN] indicators at a glance |
 
 ---
 
@@ -86,6 +88,12 @@ When `new2_OS_lockdown.ps1` is installed, the following child-safe restrictions 
 **Machine-wide (HKLM) policies:**
 - UAC is maxed: `EnableLUA = 1`, `ConsentPromptBehaviorAdmin = 2`, `PromptOnSecureDesktop = 1`
 - Windows Store is removed: `RemoveWindowsStore = 1`
+- **Windows Installer blocked** for standard users: `DisableMSI = 2`, `DisableUserInstalls = 2`
+- **USB storage disabled** to prevent software installation from USB: `USBSTOR Start = 4`
+- **Windows Script Host disabled** (`wscript.exe` / `cscript.exe`)
+- **SmartScreen enforced** at `Block` level for unknown apps and downloads
+- **Fast User Switching disabled** so the child cannot switch to the Administrator without logging out
+- **Windows Update UI blocked** for standard users
 - Installer detection is enabled so the child cannot bypass UAC with unsigned installers
 
 **Per-user (HKCU) policies applied to the child account only:**
@@ -101,12 +109,18 @@ When `new2_OS_lockdown.ps1` is installed, the following child-safe restrictions 
 - Windows Update UI: disabled
 - Password change: `DisableChangePassword = 1`
 - Network Connections UI: grayed out (`NC_LanProperties = 0`)
+- Right-click context menu: disabled (`NoViewContextMenu = 1`)
+- Folder Options: hidden (`NoFolderOptions = 1`) — prevents showing hidden/system files
+- Taskbar changes: blocked (`NoSetTaskbar = 1`)
+- Printer add/remove: blocked (`NoAddPrinter = 1`, `NoDeletePrinter = 1`)
+- "This PC" icon: hidden from desktop and start menu (`{20D04FE0-3AEA-1069-A2D8-08002B30309D} = 1`)
 
 **Child Account:**
 - Account name: `Child` (configurable via `-ChildUser` parameter)
 - Password: **passwordless** (`New-LocalUser -NoPassword`)
 - Password change blocked: `net user Child /passwordchg:no /passwordreq:no`
 - Membership: standard `Users` group only (never `Administrators`)
+- Logout shortcut on desktop: requires admin UAC approval to run
 
 **Admin Exemption:**
 The built-in Administrator account is unaffected by all child restrictions and can:
@@ -238,6 +252,21 @@ Select an administrative action (1-6):
   - `PromptOnSecureDesktop = 1`
 - `HKLM\SOFTWARE\Policies\Microsoft\WindowsStore`
   - `RemoveWindowsStore = 1`
+- `HKLM\SOFTWARE\Policies\Microsoft\Windows\Installer`
+  - `DisableMSI = 2`
+  - `DisableUserInstalls = 2`
+  - `DisableUserInstallsViaModifications = 1`
+- `HKLM\SYSTEM\CurrentControlSet\Services\USBSTOR`
+  - `Start = 4`
+- `HKLM\SOFTWARE\Microsoft\Windows Script Host\Settings`
+  - `Enabled = 0`
+- `HKLM\SOFTWARE\Policies\Microsoft\Windows\System`
+  - `EnableSmartScreen = 1`
+  - `ShellSmartScreenLevel = Block`
+- `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System`
+  - `HideFastUserSwitching = 1`
+- `HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate`
+  - `DisableWindowsUpdateAccess = 1`
 
 ### OS Child Lockdown Policies (User Policy — Child account only)
 - `HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\System`
@@ -254,6 +283,14 @@ Select an administrative action (1-6):
   - `StartMenuAdminTools = 0`
 - `HKCU\Software\Policies\Microsoft\Windows\System`
   - `DisableCMD = 2`
+- `HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer`
+  - `NoViewContextMenu = 1`
+  - `NoFolderOptions = 1`
+  - `NoSetTaskbar = 1`
+  - `NoAddPrinter = 1`
+  - `NoDeletePrinter = 1`
+- `HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\NonEnum`
+  - `{20D04FE0-3AEA-1069-A2D8-08002B30309D} = 1`
 
 ---
 
@@ -307,6 +344,9 @@ See [changelog.md](changelog.md) for a full list of changes, fixes, and security
 This section tracks upcoming and recently merged changes before they are tagged in a formal release.
 
 - **OS Child Lockdown** added to `new2_OS_lockdown.ps1` (passwordless `Child` account, UAC max, Store removal, per-user policy blocks).
+- **Stricter OS Lockdown** (2026-06-30): Windows Installer blocked, USB storage disabled, Windows Script Host disabled, SmartScreen enforced, Fast User Switching disabled, Windows Update UI blocked, right-click context menu disabled, Folder Options hidden, taskbar changes blocked, printer add/remove blocked, and "This PC" hidden.
+- **Admin-Approval Logout Shortcut** added to the child's desktop (requires UAC elevation to run `shutdown /l`).
+- **Interactive TUI Category Status Grid** added: a compact two-column grid showing all 25+ lock categories with [ENABLED] / [DISABLED] / [UNKNOWN] indicators so you can see every enabled and disabled category at a glance.
 - **CLI renamed** from `dnslock` to `oslock` for the full OS+DNS suite (`new2_OS_lockdown.ps1`). The DNS-only `new2.ps1` still uses `dnslock`.
 - **New regression tests** in `tests/` folder: `syntax_check.ps1` (auto syntax checker + chmod) and `test_os_lockdown.ps1` (read-only state verification).
 - **Child Logon Task** (`OSGuard-ChildLogon`) ensures HKCU restrictions are reapplied at every child logon.

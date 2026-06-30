@@ -16,6 +16,9 @@ All notable changes to this project are documented in this file. Dates are in IS
 - WMI event subscription renamed to `OSGuardWmiHealth`.
 - Integrity hash registry key renamed from `PushConfigBackoffInterval` to `OSGuardIntegrity`.
 - Added regression test suite in `tests/` folder with `syntax_check.ps1` and `test_os_lockdown.ps1`.
+- **Stricter OS Lockdown** (2026-06-30T04:12:00Z): Windows Installer blocked (`DisableMSI=2`), USB storage disabled (`USBSTOR Start=4`), Windows Script Host disabled (`Enabled=0`), SmartScreen enforced (`Block` level), Fast User Switching disabled, Windows Update UI blocked for standard users, right-click context menu disabled, Folder Options hidden, taskbar changes blocked, printer add/remove blocked, and "This PC" hidden from desktop/start menu.
+- **Admin-Approval Logout Shortcut** placed on the child's desktop. Clicking it triggers a UAC elevation prompt; the child cannot log out without an administrator entering credentials.
+- **Interactive TUI Category Status Grid** added: a compact two-column grid shows all 25+ lock categories (DNS, UAC, Store, Installer, USB, WSH, SmartScreen, Fast User Switching, Windows Update, Child Account, Task Manager, Registry Tools, CMD/Run, Control Panel, Wallpaper/Themes, AutoPlay, Admin Tools, Add/Remove Programs, Network UI, Password Change, Right-Click, Folder Options, Taskbar, Printers, This PC, Logout Shortcut, Background Service, Integrity) with [ENABLED] / [DISABLED] / [UNKNOWN] indicators so you can see every enabled and disabled category at a glance.
 
 ## 2026-06-29T04:11:00Z
 

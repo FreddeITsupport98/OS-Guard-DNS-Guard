@@ -152,7 +152,22 @@ $MachinePolicies = @(
     # Block Windows Store so child cannot install apps
     @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore"; Name = "RemoveWindowsStore"; Value = 1 },
     @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore"; Name = "AutoDownload"; Value = 2 },
-    @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore"; Name = "DisableStoreApps"; Value = 1 }
+    @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore"; Name = "DisableStoreApps"; Value = 1 },
+    # Block Windows Installer for non-managed users (prevents .msi / .exe installer elevation)
+    @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Installer"; Name = "DisableMSI"; Value = 2 },
+    @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Installer"; Name = "DisableUserInstalls"; Value = 2 },
+    @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Installer"; Name = "DisableUserInstallsViaModifications"; Value = 1 },
+    # Disable Windows Script Host (wscript.exe / cscript.exe)
+    @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows Script Host\Settings"; Name = "Enabled"; Value = 0 },
+    # Disable USB storage (prevent installing software from USB)
+    @{ Path = "HKLM:\SYSTEM\CurrentControlSet\Services\USBSTOR"; Name = "Start"; Value = 4 },
+    # SmartScreen - block unknown apps and downloads
+    @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"; Name = "EnableSmartScreen"; Value = 1 },
+    @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"; Name = "ShellSmartScreenLevel"; Value = "Block" },
+    # Block Windows Update UI for standard users
+    @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"; Name = "DisableWindowsUpdateAccess"; Value = 1 },
+    # Disable Fast User Switching (prevents switching to admin without logging out)
+    @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"; Name = "HideFastUserSwitching"; Value = 1 }
 )
 
 # Per-user (HKCU) policies applied to the child account only.
@@ -185,7 +200,18 @@ $ChildHivePolicies = @(
     # Network Connections UI restrictions (also applied machine-wide by DNS module)
     @{ SubPath = "Software\Policies\Microsoft\Windows\Network Connections"; Name = "NC_LanProperties"; Value = 0 },
     @{ SubPath = "Software\Policies\Microsoft\Windows\Network Connections"; Name = "NC_LanChangeProperties"; Value = 0 },
-    @{ SubPath = "Software\Policies\Microsoft\Windows\Network Connections"; Name = "NC_AllowAdvancedTCPIPConfig"; Value = 0 }
+    @{ SubPath = "Software\Policies\Microsoft\Windows\Network Connections"; Name = "NC_AllowAdvancedTCPIPConfig"; Value = 0 },
+    # Disable right-click context menu (prevents "Run as administrator", properties, etc.)
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer"; Name = "NoViewContextMenu"; Value = 1 },
+    # Hide Folder Options (prevent showing hidden/system files)
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer"; Name = "NoFolderOptions"; Value = 1 },
+    # Block taskbar changes
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer"; Name = "NoSetTaskbar"; Value = 1 },
+    # Block adding/removing printers
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer"; Name = "NoAddPrinter"; Value = 1 },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer"; Name = "NoDeletePrinter"; Value = 1 },
+    # Hide "This PC" from desktop and start menu
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\NonEnum"; Name = "{20D04FE0-3AEA-1069-A2D8-08002B30309D}"; Value = 1 }
 )
 
 # ============================================================================
@@ -364,17 +390,76 @@ function Remove-ChildHivePolicies {
     }
 }
 
+function Set-ChildLogoutShortcut {
+    <#
+        Creates a shortcut on the child's desktop that logs the user out.
+        The shortcut is flagged to run as administrator, so the child sees a UAC prompt
+        and cannot approve it without an admin password.
+    #>
+    $ChildProfilePath = $null
+    try {
+        $ChildProfile = Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue | Where-Object { $_.LocalPath -like "*\$ChildUser" } | Select-Object -First 1
+        if ($ChildProfile) { $ChildProfilePath = $ChildProfile.LocalPath }
+    } catch {}
+    if (-not $ChildProfilePath) { $ChildProfilePath = "C:\Users\$ChildUser" }
+    $DesktopPath = Join-Path $ChildProfilePath "Desktop"
+    if (-not (Test-Path $DesktopPath)) {
+        New-Item -ItemType Directory -Path $DesktopPath -Force -ErrorAction SilentlyContinue | Out-Null
+    }
+    $ShortcutPath = Join-Path $DesktopPath "Log out.lnk"
+    try {
+        $WshShell = New-Object -ComObject WScript.Shell
+        $Shortcut = $WshShell.CreateShortcut($ShortcutPath)
+        $Shortcut.TargetPath = "C:\Windows\System32\shutdown.exe"
+        $Shortcut.Arguments = "/l /t 0"
+        $Shortcut.Description = "Log out (requires administrator approval)"
+        $Shortcut.IconLocation = "shell32.dll,48"
+        $Shortcut.Save()
+        $bytes = [System.IO.File]::ReadAllBytes($ShortcutPath)
+        $bytes[0x15] = $bytes[0x15] -bor 0x20
+        [System.IO.File]::WriteAllBytes($ShortcutPath, $bytes)
+        Write-Log -Message "Admin-approval logout shortcut created at '$ShortcutPath' for '$ChildUser'." -Type "INFO" -Color Gray
+    } catch {
+        Write-Log -Message "Failed to create logout shortcut for '$ChildUser': $_" -Type "WARN" -Color Yellow
+    }
+}
+
+function Remove-ChildLogoutShortcut {
+    <#
+        Removes the admin-approval logout shortcut from the child's desktop.
+    #>
+    $ChildProfilePath = $null
+    try {
+        $ChildProfile = Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue | Where-Object { $_.LocalPath -like "*\$ChildUser" } | Select-Object -First 1
+        if ($ChildProfile) { $ChildProfilePath = $ChildProfile.LocalPath }
+    } catch {}
+    if (-not $ChildProfilePath) { $ChildProfilePath = "C:\Users\$ChildUser" }
+    $ShortcutPath = Join-Path $ChildProfilePath "Desktop\Log out.lnk"
+    if (Test-Path $ShortcutPath) {
+        Remove-Item -Path $ShortcutPath -Force -ErrorAction SilentlyContinue
+        Write-Log -Message "Removed logout shortcut from '$ChildUser' desktop." -Type "INFO" -Color Gray
+    }
+}
+
 function Apply-MachinePolicies {
-    Write-Log -Message "Applying machine-wide OS policies (UAC max, Store block)..." -Type "INFO" -Color Yellow
+    Write-Log -Message "Applying machine-wide OS policies (UAC max, Store block, Installer block, USB disable, SmartScreen, Fast User Switching)..." -Type "INFO" -Color Yellow
     foreach ($Policy in $MachinePolicies) {
         try {
             if (-not (Test-Path $Policy.Path)) {
                 New-Item -Path $Policy.Path -Force -ErrorAction SilentlyContinue | Out-Null
             }
-            Set-ItemProperty -Path $Policy.Path -Name $Policy.Name -Value $Policy.Value -Type DWord -Force -ErrorAction SilentlyContinue
+            $PropType = if ($Policy.Value -is [string]) { "String" } else { "DWord" }
+            Set-ItemProperty -Path $Policy.Path -Name $Policy.Name -Value $Policy.Value -Type $PropType -Force -ErrorAction SilentlyContinue
         } catch {
             Write-Log -Message "Failed to set machine policy $($Policy.Name) at $($Policy.Path): $_" -Type "WARN" -Color Yellow
         }
+    }
+    # Disable USB storage service immediately
+    try {
+        Stop-Service -Name "USBSTOR" -Force -ErrorAction SilentlyContinue
+        Write-Log -Message "USB storage service stopped." -Type "INFO" -Color Gray
+    } catch {
+        Write-Log -Message "Could not stop USBSTOR service: $_" -Type "WARN" -Color Yellow
     }
     Write-Log -Message "Machine-wide OS policies enforced." -Type "SUCCESS" -Color Green
 }
@@ -395,6 +480,14 @@ function Remove-MachinePolicies {
         Set-ItemProperty -Path $UacPath -Name "ConsentPromptBehaviorAdmin" -Value 5 -Type DWord -Force -ErrorAction SilentlyContinue
         Set-ItemProperty -Path $UacPath -Name "PromptOnSecureDesktop" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
     } catch {}
+    # Re-enable USB storage service
+    try {
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\USBSTOR" -Name "Start" -Value 3 -Type DWord -Force -ErrorAction SilentlyContinue
+        Start-Service -Name "USBSTOR" -ErrorAction SilentlyContinue
+        Write-Log -Message "USB storage service restored to Manual (Start=3)." -Type "INFO" -Color Gray
+    } catch {
+        Write-Log -Message "Could not restore USBSTOR service: $_" -Type "WARN" -Color Yellow
+    }
     Write-Log -Message "Machine-wide OS policies removed (UAC restored to default)." -Type "SUCCESS" -Color Green
 }
 
@@ -421,6 +514,8 @@ function Enable-OSLock {
     net user $ChildUser /passwordchg:no 2>&1 | Out-Null
     net user $ChildUser /passwordreq:no 2>&1 | Out-Null
 
+    Set-ChildLogoutShortcut
+
     Write-Log -Message "OS Child Lockdown deployed." -Type "SUCCESS" -Color Green
 
     # Verification
@@ -440,6 +535,14 @@ function Enable-OSLock {
             if ($IsAdmin) { $FailedCount++; Write-Log -Message "Child '$ChildUser' is still an administrator!" -Type "ERROR" -Color Red }
         } catch {}
     }
+    # Verify logout shortcut
+    $ChildProfilePath = $null
+    try {
+        $ChildProfile = Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue | Where-Object { $_.LocalPath -like "*\$ChildUser" } | Select-Object -First 1
+        if ($ChildProfile) { $ChildProfilePath = $ChildProfile.LocalPath }
+    } catch {}
+    if (-not $ChildProfilePath) { $ChildProfilePath = "C:\Users\$ChildUser" }
+    if (-not (Test-Path (Join-Path $ChildProfilePath "Desktop\Log out.lnk"))) { $FailedCount++; Write-Log -Message "Logout shortcut for '$ChildUser' not found." -Type "ERROR" -Color Red }
     if ($FailedCount -eq 0) {
         if (-not $SilentLock) { Write-Host "[SUCCESS] ALL OS LOCKS DEPLOYED!" -ForegroundColor Green }
     } else {
@@ -465,6 +568,8 @@ function Disable-OSLock {
 
     # 3. Re-enable password change capability
     net user $ChildUser /passwordchg:yes 2>&1 | Out-Null
+
+    Remove-ChildLogoutShortcut
 
     Write-Log -Message "OS Child Lockdown removed." -Type "SUCCESS" -Color Green
 }
@@ -772,7 +877,62 @@ function Get-LockStatus {
             $OsLocked = $false
         }
 
-        # Check child hive policies (mount + verify a sample)
+        # Check Windows Installer block
+        $MsiPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Installer"
+        $MsiDisabled = (Get-ItemProperty -Path $MsiPath -Name "DisableMSI" -ErrorAction SilentlyContinue).DisableMSI
+        if ($MsiDisabled -eq 2) {
+            Write-Host "  [X] Windows Installer  -> BLOCKED for non-admin" -ForegroundColor Red
+        } else {
+            Write-Host "  [ ] Windows Installer  -> AVAILABLE" -ForegroundColor Green
+            $OsLocked = $false
+        }
+
+        # Check USB storage
+        $UsbStart = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\USBSTOR" -Name "Start" -ErrorAction SilentlyContinue).Start
+        if ($UsbStart -eq 4) {
+            Write-Host "  [X] USB Storage        -> DISABLED (install from USB blocked)" -ForegroundColor Red
+        } else {
+            Write-Host "  [ ] USB Storage        -> ENABLED" -ForegroundColor Green
+            $OsLocked = $false
+        }
+
+        # Check Windows Script Host
+        $WshEnabled = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows Script Host\Settings" -Name "Enabled" -ErrorAction SilentlyContinue).Enabled
+        if ($WshEnabled -eq 0) {
+            Write-Host "  [X] Windows Script Host -> DISABLED (wscript/cscript blocked)" -ForegroundColor Red
+        } else {
+            Write-Host "  [ ] Windows Script Host -> ENABLED" -ForegroundColor Green
+            $OsLocked = $false
+        }
+
+        # Check SmartScreen
+        $SmartScreen = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "EnableSmartScreen" -ErrorAction SilentlyContinue).EnableSmartScreen
+        if ($SmartScreen -eq 1) {
+            Write-Host "  [X] SmartScreen        -> ENFORCED (unknown apps blocked)" -ForegroundColor Red
+        } else {
+            Write-Host "  [ ] SmartScreen        -> NOT ENFORCED" -ForegroundColor Green
+            $OsLocked = $false
+        }
+
+        # Check Fast User Switching
+        $FastSwitch = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "HideFastUserSwitching" -ErrorAction SilentlyContinue).HideFastUserSwitching
+        if ($FastSwitch -eq 1) {
+            Write-Host "  [X] Fast User Switching -> DISABLED (can't switch to admin)" -ForegroundColor Red
+        } else {
+            Write-Host "  [ ] Fast User Switching -> ENABLED" -ForegroundColor Green
+            $OsLocked = $false
+        }
+
+        # Check Windows Update UI block
+        $WuBlocked = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" -Name "DisableWindowsUpdateAccess" -ErrorAction SilentlyContinue).DisableWindowsUpdateAccess
+        if ($WuBlocked -eq 1) {
+            Write-Host "  [X] Windows Update UI  -> BLOCKED for standard users" -ForegroundColor Red
+        } else {
+            Write-Host "  [ ] Windows Update UI  -> AVAILABLE" -ForegroundColor Green
+            $OsLocked = $false
+        }
+
+        # Check child hive policies (mount + verify samples)
         $HiveMount = Mount-ChildHive
         if ($HiveMount) {
             $SamplePath = "Registry::HKEY_USERS\$HiveMount\Software\Microsoft\Windows\CurrentVersion\Policies\System"
@@ -784,9 +944,57 @@ function Get-LockStatus {
                 Write-Host "  [ ] TaskMgr/Regedit    -> ENABLED for child" -ForegroundColor Green
                 $OsLocked = $false
             }
+
+            $ExplorerPath = "Registry::HKEY_USERS\$HiveMount\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer"
+            $NoCtx = (Get-ItemProperty -Path $ExplorerPath -Name "NoViewContextMenu" -ErrorAction SilentlyContinue).NoViewContextMenu
+            $NoFolder = (Get-ItemProperty -Path $ExplorerPath -Name "NoFolderOptions" -ErrorAction SilentlyContinue).NoFolderOptions
+            $NoTaskbar = (Get-ItemProperty -Path $ExplorerPath -Name "NoSetTaskbar" -ErrorAction SilentlyContinue).NoSetTaskbar
+            $NoAddPrinter = (Get-ItemProperty -Path $ExplorerPath -Name "NoAddPrinter" -ErrorAction SilentlyContinue).NoAddPrinter
+            $NoDelPrinter = (Get-ItemProperty -Path $ExplorerPath -Name "NoDeletePrinter" -ErrorAction SilentlyContinue).NoDeletePrinter
+
+            if ($NoCtx -eq 1) {
+                Write-Host "  [X] Right-Click Menu   -> DISABLED for child" -ForegroundColor Red
+            } else {
+                Write-Host "  [ ] Right-Click Menu   -> ENABLED for child" -ForegroundColor Green
+                $OsLocked = $false
+            }
+            if ($NoFolder -eq 1) {
+                Write-Host "  [X] Folder Options     -> HIDDEN for child" -ForegroundColor Red
+            } else {
+                Write-Host "  [ ] Folder Options     -> VISIBLE for child" -ForegroundColor Green
+                $OsLocked = $false
+            }
+            if ($NoTaskbar -eq 1) {
+                Write-Host "  [X] Taskbar Changes    -> BLOCKED for child" -ForegroundColor Red
+            } else {
+                Write-Host "  [ ] Taskbar Changes    -> ALLOWED for child" -ForegroundColor Green
+                $OsLocked = $false
+            }
+            if ($NoAddPrinter -eq 1 -and $NoDelPrinter -eq 1) {
+                Write-Host "  [X] Printer Changes    -> BLOCKED for child" -ForegroundColor Red
+            } else {
+                Write-Host "  [ ] Printer Changes    -> ALLOWED for child" -ForegroundColor Green
+                $OsLocked = $false
+            }
+
             Dismount-ChildHive -HiveMount $HiveMount
         } else {
             Write-Host "  [~] Child Hive         -> Not mountable (will apply at logon)" -ForegroundColor DarkGray
+        }
+
+        # Check logout shortcut
+        $ChildProfilePath = $null
+        try {
+            $ChildProfile = Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue | Where-Object { $_.LocalPath -like "*\$ChildUser" } | Select-Object -First 1
+            if ($ChildProfile) { $ChildProfilePath = $ChildProfile.LocalPath }
+        } catch {}
+        if (-not $ChildProfilePath) { $ChildProfilePath = "C:\Users\$ChildUser" }
+        $ShortcutPath = Join-Path $ChildProfilePath "Desktop\Log out.lnk"
+        if (Test-Path $ShortcutPath) {
+            Write-Host "  [X] Logout Shortcut    -> CREATED (requires admin approval)" -ForegroundColor Cyan
+        } else {
+            Write-Host "  [ ] Logout Shortcut    -> MISSING" -ForegroundColor DarkGray
+            $OsLocked = $false
         }
     }
 
@@ -842,6 +1050,202 @@ function Get-LockStatus {
     }
 
     return @{ Dns = $DnsLocked; Os = $OsLocked }
+}
+
+function Show-CategoryGrid {
+    <#
+        Prints a compact two-column category status grid at the top of the TUI.
+        Reads key registry values directly so it is independent of Get-LockStatus.
+    #>
+    $Categories = [ordered]@{}
+
+    # --- DNS ---
+    $AnyDns = $false
+    $Adapters = Get-NetAdapter -IncludeHidden:$false -ErrorAction SilentlyContinue
+    if (-not $Adapters) { $Adapters = Get-NetAdapter -ErrorAction SilentlyContinue }
+    foreach ($Adapter in $Adapters) {
+        $Guid = $Adapter.InterfaceGuid
+        foreach ($SubKeyPath in @("SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$Guid", "SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\$Guid")) {
+            try {
+                $RegKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($SubKeyPath, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadSubTree, [System.Security.AccessControl.RegistryRights]::ReadPermissions)
+                if ($RegKey) {
+                    $Acl = $RegKey.GetAccessControl()
+                    foreach ($Rule in $Acl.Access) {
+                        try {
+                            $RuleSid = $Rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier])
+                            if (($RuleSid.Value -eq $SidAdmin.Value -or $RuleSid.Value -eq $SidSystem.Value) -and $Rule.AccessControlType -eq "Deny") { $AnyDns = $true }
+                        } catch {}
+                    }
+                    $RegKey.Close()
+                }
+            } catch {}
+        }
+    }
+    $Categories["DNS Lock"] = $AnyDns
+
+    $GpoEnforced = $true
+    $NetConn = Get-ItemProperty -Path $GpoPath -ErrorAction SilentlyContinue
+    if (-not $NetConn -or $NetConn.NC_LanProperties -ne 0) { $GpoEnforced = $false }
+    $Edge = Get-ItemProperty -Path $EdgePath -ErrorAction SilentlyContinue
+    if ($Edge -and $Edge.DnsOverHttpsMode -ne "off") { $GpoEnforced = $false }
+    $Chrome = Get-ItemProperty -Path $ChromePath -ErrorAction SilentlyContinue
+    if ($Chrome -and $Chrome.DnsOverHttpsMode -ne "off") { $GpoEnforced = $false }
+    $Firefox = Get-ItemProperty -Path $FirefoxPath -ErrorAction SilentlyContinue
+    if ($Firefox -and $Firefox.Enabled -ne 0) { $GpoEnforced = $false }
+    $Categories["DNS GPO/DoH"] = $GpoEnforced
+
+    # --- OS Machine-wide ---
+    $UacPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+    $UacLUA = (Get-ItemProperty -Path $UacPath -Name "EnableLUA" -ErrorAction SilentlyContinue).EnableLUA
+    $UacAdmin = (Get-ItemProperty -Path $UacPath -Name "ConsentPromptBehaviorAdmin" -ErrorAction SilentlyContinue).ConsentPromptBehaviorAdmin
+    $Categories["UAC Max"] = ($UacLUA -eq 1 -and $UacAdmin -eq 2)
+
+    $StoreRemoved = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore" -Name "RemoveWindowsStore" -ErrorAction SilentlyContinue).RemoveWindowsStore
+    $Categories["Windows Store"] = ($StoreRemoved -eq 1)
+
+    $MsiDisabled = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Installer" -Name "DisableMSI" -ErrorAction SilentlyContinue).DisableMSI
+    $Categories["Windows Installer"] = ($MsiDisabled -eq 2)
+
+    $UsbStart = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\USBSTOR" -Name "Start" -ErrorAction SilentlyContinue).Start
+    $Categories["USB Storage"] = ($UsbStart -eq 4)
+
+    $WshEnabled = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows Script Host\Settings" -Name "Enabled" -ErrorAction SilentlyContinue).Enabled
+    $Categories["WSH (cscript)"] = ($WshEnabled -eq 0)
+
+    $SmartScreen = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "EnableSmartScreen" -ErrorAction SilentlyContinue).EnableSmartScreen
+    $Categories["SmartScreen"] = ($SmartScreen -eq 1)
+
+    $FastSwitch = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "HideFastUserSwitching" -ErrorAction SilentlyContinue).HideFastUserSwitching
+    $Categories["Fast User Switching"] = ($FastSwitch -eq 1)
+
+    $WuBlocked = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" -Name "DisableWindowsUpdateAccess" -ErrorAction SilentlyContinue).DisableWindowsUpdateAccess
+    $Categories["Windows Update UI"] = ($WuBlocked -eq 1)
+
+    # --- Child Account ---
+    $ChildAccount = $null
+    try { $ChildAccount = Get-LocalUser -Name $ChildUser -ErrorAction Stop } catch {}
+    $Categories["Child Account"] = ($null -ne $ChildAccount)
+
+    # --- Child Hive (if mountable) ---
+    $HiveMount = $null
+    $ChildProfile = $null
+    try { $ChildProfile = Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue | Where-Object { $_.LocalPath -like "*\$ChildUser" } | Select-Object -First 1 } catch {}
+    if ($ChildProfile) {
+        $NtUserDat = Join-Path $ChildProfile.LocalPath "NTUSER.DAT"
+        if (Test-Path $NtUserDat) {
+            if (Test-Path "Registry::HKEY_USERS\OSGuardChildPolicy") { reg.exe unload "HKU\OSGuardChildPolicy" 2>&1 | Out-Null }
+            $Output = & reg.exe load "HKU\OSGuardChildPolicy" "$NtUserDat" 2>&1
+            if (Test-Path "Registry::HKEY_USERS\OSGuardChildPolicy") { $HiveMount = "OSGuardChildPolicy" }
+        }
+    }
+
+    if ($HiveMount) {
+        $TaskMgr = (Get-ItemProperty -Path "Registry::HKEY_USERS\$HiveMount\Software\Microsoft\Windows\CurrentVersion\Policies\System" -Name "DisableTaskMgr" -ErrorAction SilentlyContinue).DisableTaskMgr
+        $Regedit = (Get-ItemProperty -Path "Registry::HKEY_USERS\$HiveMount\Software\Microsoft\Windows\CurrentVersion\Policies\System" -Name "DisableRegistryTools" -ErrorAction SilentlyContinue).DisableRegistryTools
+        $NoRun = (Get-ItemProperty -Path "Registry::HKEY_USERS\$HiveMount\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Name "NoRun" -ErrorAction SilentlyContinue).NoRun
+        $NoControlPanel = (Get-ItemProperty -Path "Registry::HKEY_USERS\$HiveMount\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Name "NoControlPanel" -ErrorAction SilentlyContinue).NoControlPanel
+        $NoCtx = (Get-ItemProperty -Path "Registry::HKEY_USERS\$HiveMount\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Name "NoViewContextMenu" -ErrorAction SilentlyContinue).NoViewContextMenu
+        $NoFolder = (Get-ItemProperty -Path "Registry::HKEY_USERS\$HiveMount\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Name "NoFolderOptions" -ErrorAction SilentlyContinue).NoFolderOptions
+        $NoTaskbar = (Get-ItemProperty -Path "Registry::HKEY_USERS\$HiveMount\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Name "NoSetTaskbar" -ErrorAction SilentlyContinue).NoSetTaskbar
+        $NoAddPrinter = (Get-ItemProperty -Path "Registry::HKEY_USERS\$HiveMount\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Name "NoAddPrinter" -ErrorAction SilentlyContinue).NoAddPrinter
+        $NoDelPrinter = (Get-ItemProperty -Path "Registry::HKEY_USERS\$HiveMount\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Name "NoDeletePrinter" -ErrorAction SilentlyContinue).NoDeletePrinter
+        $NoThemes = (Get-ItemProperty -Path "Registry::HKEY_USERS\$HiveMount\Software\Microsoft\Windows\CurrentVersion\Policies\System" -Name "NoThemesTab" -ErrorAction SilentlyContinue).NoThemesTab
+        $NoWallpaper = (Get-ItemProperty -Path "Registry::HKEY_USERS\$HiveMount\Software\Microsoft\Windows\CurrentVersion\Policies\ActiveDesktop" -Name "NoChangingWallPaper" -ErrorAction SilentlyContinue).NoChangingWallPaper
+        $NoAutoPlay = (Get-ItemProperty -Path "Registry::HKEY_USERS\$HiveMount\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Name "NoDriveTypeAutoRun" -ErrorAction SilentlyContinue).NoDriveTypeAutoRun
+        $NoAdminTools = (Get-ItemProperty -Path "Registry::HKEY_USERS\$HiveMount\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Name "StartMenuAdminTools" -ErrorAction SilentlyContinue).StartMenuAdminTools
+        $NoAddRemove = (Get-ItemProperty -Path "Registry::HKEY_USERS\$HiveMount\Software\Microsoft\Windows\CurrentVersion\Policies\Uninstall" -Name "NoAddRemovePrograms" -ErrorAction SilentlyContinue).NoAddRemovePrograms
+        $NoPassChange = (Get-ItemProperty -Path "Registry::HKEY_USERS\$HiveMount\Software\Microsoft\Windows\CurrentVersion\Policies\System" -Name "DisableChangePassword" -ErrorAction SilentlyContinue).DisableChangePassword
+        $NoNetUi = (Get-ItemProperty -Path "Registry::HKEY_USERS\$HiveMount\Software\Policies\Microsoft\Windows\Network Connections" -Name "NC_LanProperties" -ErrorAction SilentlyContinue).NC_LanProperties
+        $NoThisPC = (Get-ItemProperty -Path "Registry::HKEY_USERS\$HiveMount\Software\Microsoft\Windows\CurrentVersion\Policies\NonEnum" -Name "{20D04FE0-3AEA-1069-A2D8-08002B30309D}" -ErrorAction SilentlyContinue)."{20D04FE0-3AEA-1069-A2D8-08002B30309D}"
+
+        $Categories["Task Manager"] = ($TaskMgr -eq 1)
+        $Categories["Registry Tools"] = ($Regedit -eq 1)
+        $Categories["CMD / Run"] = ($NoRun -eq 1)
+        $Categories["Control Panel"] = ($NoControlPanel -eq 1)
+        $Categories["Right-Click Menu"] = ($NoCtx -eq 1)
+        $Categories["Folder Options"] = ($NoFolder -eq 1)
+        $Categories["Taskbar"] = ($NoTaskbar -eq 1)
+        $Categories["Printers"] = ($NoAddPrinter -eq 1 -and $NoDelPrinter -eq 1)
+        $Categories["Wallpaper/Themes"] = ($NoThemes -eq 1 -or $NoWallpaper -eq 1)
+        $Categories["AutoPlay"] = ($NoAutoPlay -eq 255)
+        $Categories["Admin Tools"] = ($NoAdminTools -eq 0)
+        $Categories["Add/Remove Prog"] = ($NoAddRemove -eq 1)
+        $Categories["Password Change"] = ($NoPassChange -eq 1)
+        $Categories["Network UI"] = ($NoNetUi -eq 0)
+        $Categories["This PC Hidden"] = ($NoThisPC -eq 1)
+
+        [System.GC]::Collect(); [System.GC]::WaitForPendingFinalizers(); Start-Sleep -Milliseconds 300
+        reg.exe unload "HKU\OSGuardChildPolicy" 2>&1 | Out-Null
+    } else {
+        $Categories["Task Manager"] = $null
+        $Categories["Registry Tools"] = $null
+        $Categories["CMD / Run"] = $null
+        $Categories["Control Panel"] = $null
+        $Categories["Right-Click Menu"] = $null
+        $Categories["Folder Options"] = $null
+        $Categories["Taskbar"] = $null
+        $Categories["Printers"] = $null
+        $Categories["Wallpaper/Themes"] = $null
+        $Categories["AutoPlay"] = $null
+        $Categories["Admin Tools"] = $null
+        $Categories["Add/Remove Prog"] = $null
+        $Categories["Password Change"] = $null
+        $Categories["Network UI"] = $null
+        $Categories["This PC Hidden"] = $null
+    }
+
+    # --- Logout Shortcut ---
+    $ChildProfilePath = $null
+    try {
+        $ChildProfile = Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue | Where-Object { $_.LocalPath -like "*\$ChildUser" } | Select-Object -First 1
+        if ($ChildProfile) { $ChildProfilePath = $ChildProfile.LocalPath }
+    } catch {}
+    if (-not $ChildProfilePath) { $ChildProfilePath = "C:\Users\$ChildUser" }
+    $Categories["Logout Shortcut"] = (Test-Path (Join-Path $ChildProfilePath "Desktop\Log out.lnk"))
+
+    # --- Persistence ---
+    $Categories["Background Service"] = ((Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) -and (Test-Path $CmdPath))
+
+    # --- Integrity ---
+    $IntegrityRegPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WpnPlatform\Settings"
+    $IntegrityFile = Join-Path $InstallDir "integrity.sha256"
+    $IntegrityOk = $false
+    if (Test-Path $InstallScript) {
+        $ExpectedHash = $null
+        try { $ExpectedHash = (Get-ItemProperty -Path $IntegrityRegPath -Name "OSGuardIntegrity" -ErrorAction Stop).OSGuardIntegrity } catch {}
+        if (-not $ExpectedHash -and (Test-Path $IntegrityFile)) { $ExpectedHash = Get-Content -Path $IntegrityFile -Raw }
+        if ($ExpectedHash) {
+            $ActualHash = (Get-FileHash -Path $InstallScript -Algorithm SHA256).Hash
+            $IntegrityOk = ($ExpectedHash.Trim() -eq $ActualHash.Trim())
+        }
+    }
+    $Categories["Integrity"] = $IntegrityOk
+
+    # Print two-column grid
+    Write-Host "`n=====================================================" -ForegroundColor DarkGray
+    Write-Host " CATEGORY STATUS GRID " -ForegroundColor White
+    Write-Host "=====================================================" -ForegroundColor DarkGray
+    $Keys = $Categories.Keys
+    $i = 0
+    while ($i -lt $Keys.Count) {
+        $LeftKey = $Keys[$i]
+        $LeftVal = $Categories[$LeftKey]
+        $LeftStr = if ($LeftVal -eq $true) { "[ENABLED]  " } elseif ($LeftVal -eq $false) { "[DISABLED] " } else { "[UNKNOWN]  " }
+        $LeftColor = if ($LeftVal -eq $true) { "Green" } elseif ($LeftVal -eq $false) { "DarkGray" } else { "Yellow" }
+
+        if ($i + 1 -lt $Keys.Count) {
+            $RightKey = $Keys[$i + 1]
+            $RightVal = $Categories[$RightKey]
+            $RightStr = if ($RightVal -eq $true) { "[ENABLED]  " } elseif ($RightVal -eq $false) { "[DISABLED] " } else { "[UNKNOWN]  " }
+            Write-Host ("  {0}{1,-22}  {2}{3,-22}" -f $LeftStr, $LeftKey, $RightStr, $RightKey) -ForegroundColor $LeftColor
+        } else {
+            Write-Host ("  {0}{1,-22}" -f $LeftStr, $LeftKey) -ForegroundColor $LeftColor
+        }
+        $i += 2
+    }
+    Write-Host "=====================================================" -ForegroundColor DarkGray
+
+    return $Categories
 }
 
 function Test-IntegrityStatus {
@@ -1060,6 +1464,7 @@ function Install-Persistence {
     # 6. Apply ALL locks immediately (DNS + OS + child account)
     Enable-DNSLock
     Enable-OSLock
+    Set-ChildLogoutShortcut
     Write-Log -Message "INSTALLATION COMPLETE! System is permanently protected." -Type "SUCCESS" -Color Green
 
     # Final status verification
@@ -1074,6 +1479,13 @@ function Install-Persistence {
     $CurrentPath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
     if ($CurrentPath -notlike "*$InstallDir*") { $FailedCount++; Write-Log -Message "System PATH does not contain $InstallDir." -Type "ERROR" -Color Red }
     if (-not (Get-ChildAccount)) { $FailedCount++; Write-Log -Message "Child account '$ChildUser' not created." -Type "ERROR" -Color Red }
+    $ChildProfilePath = $null
+    try {
+        $ChildProfile = Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue | Where-Object { $_.LocalPath -like "*\$ChildUser" } | Select-Object -First 1
+        if ($ChildProfile) { $ChildProfilePath = $ChildProfile.LocalPath }
+    } catch {}
+    if (-not $ChildProfilePath) { $ChildProfilePath = "C:\Users\$ChildUser" }
+    if (-not (Test-Path (Join-Path $ChildProfilePath "Desktop\Log out.lnk"))) { $FailedCount++; Write-Log -Message "Logout shortcut for '$ChildUser' not found." -Type "ERROR" -Color Red }
     if ($FailedCount -eq 0) {
         Write-Host "[SUCCESS] INSTALLATION COMPLETE!" -ForegroundColor Green
     } else {
@@ -1141,6 +1553,7 @@ function Uninstall-Persistence {
     # Unlock everything FIRST (DNS + OS)
     Disable-DNSLock
     Disable-OSLock
+    Remove-ChildLogoutShortcut
 
     # Remove the Scheduled Tasks (including guardians and child logon)
     foreach ($TName in @($TaskName, $Guardian1Name, $Guardian2Name, $ChildLogonTaskName)) {
@@ -1352,6 +1765,7 @@ do {
     Write-Host "=====================================================" -ForegroundColor Cyan
 
     $CurrentStatus = Get-LockStatus
+    $CategoryGrid = Show-CategoryGrid
 
     Write-Host "`n-----------------------------------------------------"
     Write-Host "[1] DEPLOY ALL LOCKS (DNS + OS Child Lockdown)" -ForegroundColor Cyan

@@ -58,6 +58,26 @@ $StorePath = "HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore"
 $StoreRemoved = (Get-ItemProperty -Path $StorePath -Name "RemoveWindowsStore" -ErrorAction SilentlyContinue).RemoveWindowsStore
 Assert-True -Name "Store_RemoveWindowsStore" -Condition ($StoreRemoved -eq 1) -Detail "RemoveWindowsStore = $StoreRemoved"
 
+# --- 2b. Stricter Machine Policies (Installer, USB, WSH, SmartScreen, Fast User Switching, WU) ---
+$MsiPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Installer"
+$MsiDisabled = (Get-ItemProperty -Path $MsiPath -Name "DisableMSI" -ErrorAction SilentlyContinue).DisableMSI
+Assert-True -Name "Installer_DisableMSI" -Condition ($MsiDisabled -eq 2) -Detail "DisableMSI = $MsiDisabled"
+
+$UsbStart = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\USBSTOR" -Name "Start" -ErrorAction SilentlyContinue).Start
+Assert-True -Name "USBStorage_Disabled" -Condition ($UsbStart -eq 4) -Detail "USBSTOR Start = $UsbStart"
+
+$WshEnabled = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows Script Host\Settings" -Name "Enabled" -ErrorAction SilentlyContinue).Enabled
+Assert-True -Name "WSH_Disabled" -Condition ($WshEnabled -eq 0) -Detail "WSH Enabled = $WshEnabled"
+
+$SmartScreen = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "EnableSmartScreen" -ErrorAction SilentlyContinue).EnableSmartScreen
+Assert-True -Name "SmartScreen_Enforced" -Condition ($SmartScreen -eq 1) -Detail "EnableSmartScreen = $SmartScreen"
+
+$FastSwitch = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "HideFastUserSwitching" -ErrorAction SilentlyContinue).HideFastUserSwitching
+Assert-True -Name "FastUserSwitching_Disabled" -Condition ($FastSwitch -eq 1) -Detail "HideFastUserSwitching = $FastSwitch"
+
+$WuBlocked = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" -Name "DisableWindowsUpdateAccess" -ErrorAction SilentlyContinue).DisableWindowsUpdateAccess
+Assert-True -Name "WindowsUpdateUI_Blocked" -Condition ($WuBlocked -eq 1) -Detail "DisableWindowsUpdateAccess = $WuBlocked"
+
 # --- 3. Child Hive Policies (if mountable) ---
 $ChildProfile = $null
 try {
@@ -85,6 +105,20 @@ if ($ChildProfile) {
             Assert-True -Name "ChildHive_NoRun" -Condition ($NoRun -eq 1) -Detail "NoRun = $NoRun"
             Assert-True -Name "ChildHive_NoControlPanel" -Condition ($NoControlPanel -eq 1) -Detail "NoControlPanel = $NoControlPanel"
 
+            $NoCtx = (Get-ItemProperty -Path "$HiveRoot\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Name "NoViewContextMenu" -ErrorAction SilentlyContinue).NoViewContextMenu
+            $NoFolder = (Get-ItemProperty -Path "$HiveRoot\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Name "NoFolderOptions" -ErrorAction SilentlyContinue).NoFolderOptions
+            $NoTaskbar = (Get-ItemProperty -Path "$HiveRoot\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Name "NoSetTaskbar" -ErrorAction SilentlyContinue).NoSetTaskbar
+            $NoAddPrinter = (Get-ItemProperty -Path "$HiveRoot\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Name "NoAddPrinter" -ErrorAction SilentlyContinue).NoAddPrinter
+            $NoDelPrinter = (Get-ItemProperty -Path "$HiveRoot\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Name "NoDeletePrinter" -ErrorAction SilentlyContinue).NoDeletePrinter
+            $NoThisPC = (Get-ItemProperty -Path "$HiveRoot\Software\Microsoft\Windows\CurrentVersion\Policies\NonEnum" -Name "{20D04FE0-3AEA-1069-A2D8-08002B30309D}" -ErrorAction SilentlyContinue)."{20D04FE0-3AEA-1069-A2D8-08002B30309D}"
+
+            Assert-True -Name "ChildHive_NoViewContextMenu" -Condition ($NoCtx -eq 1) -Detail "NoViewContextMenu = $NoCtx"
+            Assert-True -Name "ChildHive_NoFolderOptions" -Condition ($NoFolder -eq 1) -Detail "NoFolderOptions = $NoFolder"
+            Assert-True -Name "ChildHive_NoSetTaskbar" -Condition ($NoTaskbar -eq 1) -Detail "NoSetTaskbar = $NoTaskbar"
+            Assert-True -Name "ChildHive_NoAddPrinter" -Condition ($NoAddPrinter -eq 1) -Detail "NoAddPrinter = $NoAddPrinter"
+            Assert-True -Name "ChildHive_NoDeletePrinter" -Condition ($NoDelPrinter -eq 1) -Detail "NoDeletePrinter = $NoDelPrinter"
+            Assert-True -Name "ChildHive_HideThisPC" -Condition ($NoThisPC -eq 1) -Detail "ThisPC hidden = $NoThisPC"
+
             [System.GC]::Collect(); [System.GC]::WaitForPendingFinalizers(); Start-Sleep -Milliseconds 300
             reg.exe unload "HKU\$HiveMount" 2>&1 | Out-Null
         } else {
@@ -96,6 +130,16 @@ if ($ChildProfile) {
 } else {
     Write-Host "[SKIP] ChildHive checks — profile not found (child may never have logged in)." -ForegroundColor Yellow
 }
+
+# --- 2c. Logout Shortcut ---
+$ChildProfilePath = $null
+try {
+    $ChildProfile = Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue | Where-Object { $_.LocalPath -like "*\$ChildUser" } | Select-Object -First 1
+    if ($ChildProfile) { $ChildProfilePath = $ChildProfile.LocalPath }
+} catch {}
+if (-not $ChildProfilePath) { $ChildProfilePath = "C:\Users\$ChildUser" }
+$ShortcutPath = Join-Path $ChildProfilePath "Desktop\Log out.lnk"
+Assert-True -Name "ChildLogoutShortcut_Exists" -Condition (Test-Path $ShortcutPath) -Detail "Logout shortcut not found at $ShortcutPath"
 
 # --- 4. DNS Lock State (sample first adapter) ---
 $Adapter = Get-NetAdapter -ErrorAction SilentlyContinue | Select-Object -First 1
