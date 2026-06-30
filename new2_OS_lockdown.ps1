@@ -767,7 +767,8 @@ function Apply-EdgePolicies {
     if (-not (Test-Path $UrlBlockPath)) { New-Item -Path $UrlBlockPath -Force -ErrorAction SilentlyContinue | Out-Null }
     $BlockedUrls = @("edge://settings","edge://flags","edge://extensions","edge://downloads","edge://passwords","edge://history","edge://bookmarks","chrome://settings","chrome://flags","about:config")
     # Find highest existing numeric key so we append rather than overwrite existing blocklists
-    $ExistingKeys = Get-ItemProperty -Path $UrlBlockPath -ErrorAction SilentlyContinue | Get-Member -MemberType NoteProperty | Where-Object { $_.Name -match '^\d+$' } | Select-Object -ExpandProperty Name | ForEach-Object { [int]$_ } | Sort-Object -Descending
+    $UrlBlockObj = Get-ItemProperty -Path $UrlBlockPath -ErrorAction SilentlyContinue
+    $ExistingKeys = if ($UrlBlockObj) { $UrlBlockObj | Get-Member -MemberType NoteProperty | Where-Object { $_.Name -match '^\d+$' } | Select-Object -ExpandProperty Name | ForEach-Object { [int]$_ } | Sort-Object -Descending } else { @() }
     $i = if ($ExistingKeys) { $ExistingKeys[0] + 1 } else { 1 }
     foreach ($Url in $BlockedUrls) {
         Set-ItemProperty -Path $UrlBlockPath -Name "$i" -Value $Url -Type String -Force -ErrorAction SilentlyContinue
