@@ -4097,7 +4097,7 @@ function Invoke-AsSystem {
     $CommonTemp = "C:\Windows\Temp"
     $ResultFile = "$CommonTemp\OSGuard_CleanupResult.txt"
     $TempScript = "$CommonTemp\OSGuard_Cleanup.ps1"
-    Write-Log -Message "[DEBUG] Invoke-AsSystem called. CommonTemp=$CommonTemp" -Type "INFO" -Color Yellow
+    Write-Host "[DEBUG] Invoke-AsSystem called. CommonTemp=$CommonTemp" -ForegroundColor Yellow
     try {
         # Ensure SYSTEM can write to the common temp directory
         $TempAcl = Get-Acl -Path $CommonTemp
@@ -4107,13 +4107,13 @@ function Invoke-AsSystem {
         # Write the cleanup command to a temporary script file with error capture
         $ScriptContent = "try { `$ErrorActionPreference = 'Stop'; $Command; 'SUCCESS' | Out-File -FilePath '$ResultFile' -Encoding UTF8 -Force } catch { `$_.Exception.Message | Out-File -FilePath '$ResultFile' -Encoding UTF8 -Force }"
         $ScriptContent | Out-File -FilePath $TempScript -Encoding UTF8 -Force
-        Write-Log -Message "[DEBUG] Temp script written to $TempScript" -Type "INFO" -Color Yellow
+        Write-Host "[DEBUG] Temp script written to $TempScript" -ForegroundColor Yellow
         # Use full PowerShell path and execute the temp script
         $Action = New-ScheduledTaskAction -Execute "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument "-ExecutionPolicy Bypass -File `"$TempScript`""
         $Principal = New-ScheduledTaskPrincipal -UserId "S-1-5-18" -LogonType ServiceAccount -RunLevel Highest
         Register-ScheduledTask -TaskName $TempTaskName -Action $Action -Principal $Principal -Force | Out-Null
         Start-ScheduledTask -TaskName $TempTaskName
-        Write-Log -Message "[DEBUG] SYSTEM task started. Waiting for completion..." -Type "INFO" -Color Yellow
+        Write-Host "[DEBUG] SYSTEM task started. Waiting for completion..." -ForegroundColor Yellow
         # Wait up to 30 seconds
         $MaxWait = 30
         $Waited = 0
@@ -4124,13 +4124,13 @@ function Invoke-AsSystem {
             if (-not $Task) { break }
         }
         Unregister-ScheduledTask -TaskName $TempTaskName -Confirm:$false | Out-Null
-        Write-Log -Message "[DEBUG] SYSTEM task completed and unregistered." -Type "INFO" -Color Yellow
+        Write-Host "[DEBUG] SYSTEM task completed and unregistered." -ForegroundColor Yellow
         if (Test-Path $ResultFile) {
             $Result = Get-Content -Path $ResultFile -Raw
-            Write-Log -Message "[DEBUG] SYSTEM task result: $Result" -Type "INFO" -Color Yellow
+            Write-Host "[DEBUG] SYSTEM task result: $Result" -ForegroundColor Yellow
             Remove-Item -Path $ResultFile -Force -ErrorAction SilentlyContinue
         } else {
-            Write-Log -Message "[DEBUG] No result file found at $ResultFile" -Type "ERROR" -Color Red
+            Write-Host "[DEBUG] No result file found at $ResultFile" -ForegroundColor Red
         }
         Remove-Item -Path $TempScript -Force -ErrorAction SilentlyContinue
     } catch {
@@ -4254,6 +4254,10 @@ function Uninstall-Persistence {
             Write-Log -Message "Direct deletion failed (hardened ACLs). Spawning SYSTEM cleanup task..." -Type "INFO" -Color Yellow
             Invoke-AsSystem -Command "takeown.exe /F $InstallDir /R /D Y; icacls.exe $InstallDir /reset /T; Remove-Item -Path $InstallDir -Recurse -Force -ErrorAction Stop"
             Start-Sleep -Seconds 3
+            # Fallback: SYSTEM task may have reset ACLs; try one last direct delete before declaring failure
+            if (Test-Path $InstallDir) {
+                try { Remove-Item -Path $InstallDir -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+            }
             if (Test-Path $InstallDir) {
                 Write-Log -Message "SYSTEM cleanup failed: $InstallDir still exists." -Type "ERROR" -Color Red
             } else {
