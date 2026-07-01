@@ -176,8 +176,8 @@ function Write-Log {
     param ([string]$Message, [string]$Type = "INFO", [ConsoleColor]$Color = "White")
     $TimeStamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     try {
-        if (-not (Test-Path $InstallDir)) { New-Item -ItemType Directory -Path $InstallDir -Force -ErrorAction SilentlyContinue | Out-Null }
-        "[$TimeStamp] [$Type] $Message" | Out-File -FilePath $LogFile -Append -Encoding UTF8 -ErrorAction Stop
+        if (-not $script:SuppressLogDirCreation -and -not (Test-Path $InstallDir)) { New-Item -ItemType Directory -Path $InstallDir -Force -ErrorAction SilentlyContinue | Out-Null }
+        if (Test-Path $InstallDir) { "[$TimeStamp] [$Type] $Message" | Out-File -FilePath $LogFile -Append -Encoding UTF8 -ErrorAction Stop }
     } catch {}
 
     # Write to Windows Event Log for tamper-resistant auditing
@@ -4150,6 +4150,9 @@ function Uninstall-Persistence {
 
     Write-Log -Message "Uninstalling OS-Guard from System..." -Type "ACTION" -Color Yellow
 
+    # Suppress auto-directory-creation in Write-Log so we can cleanly delete the install dir
+    $script:SuppressLogDirCreation = $true
+
     # Stop any running Window Guard process
     Stop-WindowGuard
     Stop-TempUnlockTimer
@@ -4286,6 +4289,9 @@ function Uninstall-Persistence {
     if (Test-Path $CmdPath) { $FailedCount++; Write-Log -Message "Global CLI $CmdPath still exists." -Type "ERROR" -Color Red }
     $CurrentPath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
     if ($CurrentPath -like "*$InstallDir*") { $FailedCount++; Write-Log -Message "System PATH still contains $InstallDir." -Type "ERROR" -Color Red }
+
+    # Re-enable log directory creation for future operations
+    $script:SuppressLogDirCreation = $false
 
     if ($FailedCount -eq 0) {
         Write-Host "`n[SUCCESS] UNINSTALLATION COMPLETE!" -ForegroundColor Green
