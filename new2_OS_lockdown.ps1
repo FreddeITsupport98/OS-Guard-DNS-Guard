@@ -511,6 +511,43 @@ function Get-PBKDF2Salt {
     return [Convert]::ToBase64String($Salt)
 }
 
+function New-MemorablePassword {
+    <#
+        Generates a memorable password using a common word + 2-digit number + easy symbol.
+        Easy symbols are limited to keys found on all keyboards: ! # $ % & + - = ? _ @
+    #>
+    $Words = @(
+        "Dragon","Tiger","Lion","Bear","Wolf","Eagle","Fox","Cat","Dog","Bird",
+        "Fish","Owl","Frog","Snake","House","Cloud","Moon","Star","Tree","Fire",
+        "Ice","Wind","Sun","Road","Lake","Rock","Sand","Snow","Wave","Rose",
+        "Sky","Sea","Gold","Boat","Car","Train","Plane","Ship","Door","Wall",
+        "Desk","Chair","Table","Bed","Book","Pen","Cup","Hat","Shoe","Coat",
+        "Bag","Box","Ring","Game","Ball","Toy","Flag","Map","Sword","Robot",
+        "Knight","Castle","Tower","Bridge","Garden","Park","Forest","Beach","Hill","River"
+    )
+    $Symbols = @("!","#","$","%","&","+","-","=","?","_","@")
+    $Word = $Words | Get-Random
+    $Number = Get-Random -Minimum 10 -Maximum 99
+    $Symbol = $Symbols | Get-Random
+    $Patterns = @(
+        "{0}{1}{2}",    # WordNumberSymbol  e.g. Dragon42!
+        "{0}{2}{1}",    # WordSymbolNumber  e.g. Dragon!42
+        "{1}{0}{2}",    # NumberWordSymbol  e.g. 42Dragon!
+        "{2}{0}{1}"     # SymbolWordNumber  e.g. !Dragon42
+    )
+    $Pattern = $Patterns | Get-Random
+    return ($Pattern -f $Word, $Number, $Symbol)
+}
+
+function Test-PasswordComplexity {
+    param([string]$Password)
+    # Relaxed complexity: at least 6 chars, at least one letter and one number
+    if ($Password.Length -lt 6) { return $false }
+    $HasLetter = $Password -match '[a-zA-Z]'
+    $HasNumber = $Password -match '\d'
+    return ($HasLetter -and $HasNumber)
+}
+
 function New-ChildAccount {
     <#
         Creates a PASSWORDLESS local standard user if it does not already exist.
@@ -836,6 +873,13 @@ function Set-ParentPassword {
     $SaltRegName = "OSGuardParentPasswordSalt"
     $IterRegName = "OSGuardParentPasswordIterations"
     Write-Host "`n[SET PARENT MODE PASSWORD]" -ForegroundColor Cyan
+    Write-Host "  Suggested memorable passwords (easy to remember, still secure):" -ForegroundColor DarkGray
+    for ($i = 1; $i -le 3; $i++) {
+        $Suggestion = New-MemorablePassword
+        Write-Host "    $i) $Suggestion" -ForegroundColor Yellow
+    }
+    Write-Host "  (You can type your own, or use one of the suggestions above)" -ForegroundColor DarkGray
+    Write-Host "  Allowed easy symbols: ! # $ % & + - = ? _ @" -ForegroundColor DarkGray
     $NewPw = Read-Host "Enter new Parent Mode password" -AsSecureString
     $ConfirmPw = Read-Host "Confirm new Parent Mode password" -AsSecureString
     $NewPlain = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($NewPw))
@@ -844,8 +888,9 @@ function Set-ParentPassword {
         Write-Host "[ERROR] Passwords do not match. Password NOT changed." -ForegroundColor Red
         return
     }
-    if ($NewPlain.Length -lt 8) {
-        Write-Host "[ERROR] Password must be at least 8 characters." -ForegroundColor Red
+    if (-not (Test-PasswordComplexity -Password $NewPlain)) {
+        Write-Host "[ERROR] Password must be at least 6 characters and contain at least one letter and one number." -ForegroundColor Red
+        Write-Host "        Example: Dragon42!  (word + number + symbol)" -ForegroundColor Yellow
         return
     }
     $SaltStr = Get-PBKDF2Salt
@@ -3937,9 +3982,11 @@ function Install-Persistence {
 
     # 7. Set default Parent Mode password and create requests directory
     Write-Log -Message "Setting default Parent Mode password and creating requests directory..." -Type "INFO" -Color Yellow
-    $DefaultPw = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 12 | ForEach-Object { [char]$_ })
+    $DefaultPw = New-MemorablePassword
     Write-Host "`n[IMPORTANT] Your default Parent Mode password is: $DefaultPw" -ForegroundColor Yellow
     Write-Host "            Please write it down. You will need it to enter Parent Mode and approve installations." -ForegroundColor Yellow
+    Write-Host "            Example pattern: Word + Number + Easy symbol (e.g., Dragon42!)" -ForegroundColor DarkGray
+    Write-Host "            You can change it anytime via menu option [14] or 'oslock -SetParentPassword'." -ForegroundColor DarkGray
     $SaltStr = Get-PBKDF2Salt
     $HashStr = New-PBKDF2Hash -Password $DefaultPw -SaltBase64 $SaltStr -Iterations 100000
     try {
