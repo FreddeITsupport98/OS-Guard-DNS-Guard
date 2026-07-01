@@ -43,6 +43,8 @@ param (
     [switch]$TamperLockout,
     [switch]$ApproveChildInstall,
     [switch]$RehardenChildInstall,
+    [switch]$BypassMitigation,
+    [switch]$RemoveBypassMitigation,
     [switch]$HealthCheck,
     [switch]$WhatIf,
     [switch]$ExportReport,
@@ -102,6 +104,8 @@ if (-not $Principal.IsInRole($Role)) {
             if ($TamperLockout) { $ArgsString += " -TamperLockout" }
             if ($ApproveChildInstall) { $ArgsString += " -ApproveChildInstall" }
             if ($RehardenChildInstall) { $ArgsString += " -RehardenChildInstall" }
+            if ($BypassMitigation) { $ArgsString += " -BypassMitigation" }
+            if ($RemoveBypassMitigation) { $ArgsString += " -RemoveBypassMitigation" }
             if ($HealthCheck) { $ArgsString += " -HealthCheck" }
             if ($WhatIf) { $ArgsString += " -WhatIf" }
             if ($ExportReport) { $ArgsString += " -ExportReport" }
@@ -387,6 +391,8 @@ $ChildHivePolicies = @(
     @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer"; Name = "DisableContextMenusInStart"; Value = 1 },
     @{ SubPath = "Software\Policies\Microsoft\Windows\Explorer"; Name = "DisableNotificationCenter"; Value = 1 },
     @{ SubPath = "Software\Policies\Microsoft\Windows\CloudContent"; Name = "DisableWindowsConsumerFeatures"; Value = 1 },
+    @{ SubPath = "Software\Policies\Microsoft\Windows\Explorer"; Name = "DisableSearchBoxSuggestions"; Value = 1 },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "5"; Value = "explorer.exe" },
     @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "6"; Value = "powershell.exe" },
     @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "7"; Value = "pwsh.exe" },
     @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "8"; Value = "cmd.exe" },
@@ -440,7 +446,96 @@ $ChildHivePolicies = @(
     @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "55"; Value = "vivaldi.exe" },
     @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "56"; Value = "waterfox.exe" },
     @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "57"; Value = "tor.exe" },
-    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "58"; Value = "iexplore.exe" }
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "58"; Value = "iexplore.exe" },
+    # Extended bypass mitigation entries
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "59"; Value = "powershell_ise.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "60"; Value = "wt.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "61"; Value = "WindowsTerminal.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "62"; Value = "Code.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "63"; Value = "python.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "64"; Value = "python3.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "65"; Value = "py.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "66"; Value = "node.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "67"; Value = "java.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "68"; Value = "javaw.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "69"; Value = "dotnet.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "70"; Value = "docker.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "71"; Value = "winget.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "72"; Value = "AppInstaller.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "73"; Value = "steam.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "74"; Value = "epicgameslauncher.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "75"; Value = "origin.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "76"; Value = "uplay.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "77"; Value = "battle.net.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "78"; Value = "Discord.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "79"; Value = "Telegram.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "80"; Value = "AnyDesk.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "81"; Value = "TeamViewer.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "82"; Value = "mstsc.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "83"; Value = "VirtualBox.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "84"; Value = "vmware.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "85"; Value = "qemu-system-x86_64.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "86"; Value = "PuTTY.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "87"; Value = "WinSCP.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "88"; Value = "FileZilla.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "89"; Value = "openvpn.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "90"; Value = "nordvpn.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "91"; Value = "expressvpn.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "92"; Value = "protonvpn.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "93"; Value = "ssh.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "94"; Value = "wsl.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "95"; Value = "bash.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "96"; Value = "vmcompute.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "97"; Value = "vmwp.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "98"; Value = "msdt.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "99"; Value = "sdbinst.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "100"; Value = "wusa.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "101"; Value = "tscon.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "102"; Value = "tsdiscon.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "103"; Value = "shadow.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "104"; Value = "tskill.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "105"; Value = "qwinsta.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "106"; Value = "rwinsta.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "107"; Value = "reset_session.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "108"; Value = "SnippingTool.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "109"; Value = "ScreenSketch.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "110"; Value = "SpeechRuntime.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "111"; Value = "SearchIndexer.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "112"; Value = "SearchUI.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "113"; Value = "Cortana.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "114"; Value = "GameBar.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "115"; Value = "GameBarPresenceWriter.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "116"; Value = "XboxApp.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "117"; Value = "XboxGameBar.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "118"; Value = "XboxGameBarSpotify.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "119"; Value = "ms-teams.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "120"; Value = "Teams.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "121"; Value = "slack.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "122"; Value = "zoom.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "123"; Value = "webex.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "124"; Value = "gotomeeting.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "125"; Value = "join.me.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "126"; Value = "remotedesktop.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "127"; Value = "chrome_remote_desktop.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "128"; Value = "parsec.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "129"; Value = "moonlight.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "130"; Value = "rainway.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "131"; Value = "shadow.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "132"; Value = "airgpu.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "133"; Value = "maximumsettings.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "134"; Value = "cloud gaming.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "135"; Value = "geforcenow.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "136"; Value = "boosteroid.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "137"; Value = "luna.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "138"; Value = "stadia.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "139"; Value = "xboxcloudgaming.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "140"; Value = "playstationnow.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "141"; Value = "psremoteplay.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "142"; Value = "steamlink.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "143"; Value = "nvidiashield.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "144"; Value = "amdlink.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "145"; Value = "intelunison.exe" },
+    @{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun"; Name = "146"; Value = "linktowindows.exe" }
 )
 
 # ============================================================================
@@ -2558,6 +2653,8 @@ function Enable-OSLock {
     # Harden per-user install directories so child cannot install even in Parent Mode
     Harden-ChildInstallDirectories
 
+    Apply-BypassMitigations
+
     Write-Log -Message "OS Child Lockdown deployed." -Type "SUCCESS" -Color Green
 
     # Verification
@@ -2666,6 +2763,7 @@ function Disable-OSLock {
         Remove-EdgePolicies
         Remove-ScreenTimeWatcher
         Remove-ChildInstallDirectoryHardening
+        Remove-BypassMitigations
     } else {
         Write-Log -Message "KeepChildAccount specified: child account policies, shortcuts, screen time, and install directory hardening are preserved." -Type "INFO" -Color Gray
     }
@@ -2675,6 +2773,331 @@ function Disable-OSLock {
     Remove-GrantBrowserTimeShortcut
 
     Write-Log -Message "OS Child Lockdown removed." -Type "SUCCESS" -Color Green
+}
+
+# ============================================================================
+# 6.5 BYPASS MITIGATION MODULE
+# ============================================================================
+
+$script:BypassUrls = @(
+    "xbox.com/play", "play.geforcenow.com", "cloud.boosteroid.com", "luna.amazon.com", "stadia.google.com",
+    "parsec.app", "moonlight-stream.org", "rainway.com", "shadow.tech", "airgpu.com", "maximumsettings.com",
+    "shell.cloud.google.com", "github.com/codespaces", "replit.com", "codesandbox.io", "codepen.io",
+    "jsfiddle.net", "stackblitz.com", "gitpod.io", "heroku.com", "aws.amazon.com/cloud9",
+    "shell.azure.com", "console.cloud.google.com", "ide.goorm.io", "glot.io", "tio.run", "paiza.io",
+    "onlinegdb.com", "rextester.com", "ideone.com", "dotnetfiddle.net", "plnkr.co", "glitch.com",
+    "coder.com", "vscode.dev", "github.dev", "gitpod.ws", "anydesk.com", "teamviewer.com",
+    "remotedesktop.google.com", "rustdesk.com", "nomachine.com", "splashtop.com", "logmein.com",
+    "goto.com", "join.me", "discord.com", "discordapp.com", "web.telegram.org"
+)
+
+$script:IFEOTools = @("sethc.exe", "utilman.exe", "osk.exe", "magnify.exe", "narrator.exe", "DisplaySwitch.exe")
+
+$script:BlockedExtensions = @(
+    @{ Ext = ".scr"; Original = "scrfile" },
+    @{ Ext = ".com"; Original = "comfile" },
+    @{ Ext = ".pif"; Original = "piffile" }
+)
+
+function Apply-FolderExecutionDeny {
+    $ChildSidValue = Get-ChildSid
+    if (-not $ChildSidValue) { return }
+    $ChildSidObj = New-Object System.Security.Principal.SecurityIdentifier($ChildSidValue)
+    $ProfilePath = Get-ChildProfilePath
+    if (-not $ProfilePath) { return }
+    $Folders = @(
+        (Join-Path $ProfilePath "Desktop"),
+        (Join-Path $ProfilePath "Documents"),
+        (Join-Path $ProfilePath "Downloads"),
+        (Join-Path $ProfilePath "Music"),
+        (Join-Path $ProfilePath "Pictures"),
+        (Join-Path $ProfilePath "Videos"),
+        (Join-Path $ProfilePath "AppData\Local\Temp"),
+        (Join-Path $ProfilePath "AppData\Local\Microsoft\WindowsApps")
+    )
+    foreach ($Dir in $Folders) {
+        if (-not (Test-Path $Dir)) { continue }
+        try {
+            $Acl = Get-Acl -Path $Dir
+            $Acl.Access | Where-Object {
+                try {
+                    $sid = $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier])
+                    $sid.Value -eq $ChildSidValue -and $_.AccessControlType -eq "Deny"
+                } catch { $false }
+            } | ForEach-Object { $Acl.RemoveAccessRule($_) | Out-Null }
+            $DenyRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+                $ChildSidObj, "ExecuteFile", "ContainerInherit,ObjectInherit", "None", "Deny"
+            )
+            $Acl.AddAccessRule($DenyRule)
+            Set-Acl -Path $Dir -AclObject $Acl -ErrorAction Stop
+            Write-Log -Message "Denied execute on $Dir" -Type "INFO" -Color Gray
+        } catch {
+            Write-Log -Message "Failed to deny execute on $Dir`: $_" -Type "WARN" -Color Yellow
+        }
+    }
+    Write-Log -Message "Folder execution deny applied." -Type "SUCCESS" -Color Green
+}
+
+function Remove-FolderExecutionDeny {
+    $ChildSidValue = Get-ChildSid
+    if (-not $ChildSidValue) { return }
+    $ProfilePath = Get-ChildProfilePath
+    if (-not $ProfilePath) { return }
+    $Folders = @(
+        (Join-Path $ProfilePath "Desktop"), (Join-Path $ProfilePath "Documents"),
+        (Join-Path $ProfilePath "Downloads"), (Join-Path $ProfilePath "Music"),
+        (Join-Path $ProfilePath "Pictures"), (Join-Path $ProfilePath "Videos"),
+        (Join-Path $ProfilePath "AppData\Local\Temp"),
+        (Join-Path $ProfilePath "AppData\Local\Microsoft\WindowsApps")
+    )
+    foreach ($Dir in $Folders) {
+        if (-not (Test-Path $Dir)) { continue }
+        try {
+            $Acl = Get-Acl -Path $Dir
+            $Acl.Access | Where-Object {
+                try {
+                    $sid = $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier])
+                    $sid.Value -eq $ChildSidValue -and $_.AccessControlType -eq "Deny"
+                } catch { $false }
+            } | ForEach-Object { $Acl.RemoveAccessRule($_) | Out-Null }
+            Set-Acl -Path $Dir -AclObject $Acl -ErrorAction Stop
+        } catch {}
+    }
+    Write-Log -Message "Folder execution deny removed." -Type "INFO" -Color Gray
+}
+
+function Apply-IFEOBackdoorBlock {
+    $IFEOBase = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options"
+    foreach ($tool in $script:IFEOTools) {
+        $path = Join-Path $IFEOBase $tool
+        try {
+            if (-not (Test-Path $path)) { New-Item -Path $path -Force -ErrorAction Stop | Out-Null }
+            Set-ItemProperty -Path $path -Name "Debugger" -Value "C:\Windows\System32\systray.exe" -Type String -Force -ErrorAction Stop
+            Write-Log -Message "IFEO backdoor block set for $tool" -Type "INFO" -Color Gray
+        } catch {
+            Write-Log -Message "Failed to set IFEO for $tool`: $_" -Type "WARN" -Color Yellow
+        }
+    }
+    Write-Log -Message "IFEO backdoor block applied." -Type "SUCCESS" -Color Green
+}
+
+function Remove-IFEOBackdoorBlock {
+    $IFEOBase = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options"
+    foreach ($tool in $script:IFEOTools) {
+        $path = Join-Path $IFEOBase $tool
+        if (Test-Path $path) {
+            try { Remove-ItemProperty -Path $path -Name "Debugger" -Force -ErrorAction SilentlyContinue } catch {}
+        }
+    }
+    Write-Log -Message "IFEO backdoor block removed." -Type "INFO" -Color Gray
+}
+
+function Apply-EdgeBypassBlocklist {
+    $EdgeUrlPath = "HKLM:\SOFTWARE\Policies\Microsoft\Edge\URLBlocklist"
+    if (-not (Test-Path $EdgeUrlPath)) { New-Item -Path $EdgeUrlPath -Force -ErrorAction SilentlyContinue | Out-Null }
+    $ExistingKeys = @()
+    try {
+        $UrlBlockObj = Get-ItemProperty -Path $EdgeUrlPath -ErrorAction SilentlyContinue
+        if ($UrlBlockObj) {
+            $ExistingKeys = $UrlBlockObj | Get-Member -MemberType NoteProperty | Where-Object { $_.Name -match '^\d+$' } | Select-Object -ExpandProperty Name | ForEach-Object { [int]$_ } | Sort-Object -Descending
+        }
+    } catch {}
+    $i = if ($ExistingKeys) { $ExistingKeys[0] + 1 } else { 1 }
+    foreach ($Url in $script:BypassUrls) {
+        try {
+            Set-ItemProperty -Path $EdgeUrlPath -Name "$i" -Value $Url -Type String -Force -ErrorAction Stop
+            $i++
+        } catch {
+            Write-Log -Message "Failed to block URL $Url`: $_" -Type "WARN" -Color Yellow
+        }
+    }
+    Write-Log -Message "Edge bypass URL blocklist applied ($($script:BypassUrls.Count) URLs)." -Type "SUCCESS" -Color Green
+}
+
+function Remove-EdgeBypassBlocklist {
+    $EdgeUrlPath = "HKLM:\SOFTWARE\Policies\Microsoft\Edge\URLBlocklist"
+    if (Test-Path $EdgeUrlPath) {
+        foreach ($Url in $script:BypassUrls) {
+            $Props = Get-ItemProperty -Path $EdgeUrlPath -ErrorAction SilentlyContinue
+            if ($Props) {
+                $Props | Get-Member -MemberType NoteProperty | Where-Object { $_.Name -match '^\d+$' } | ForEach-Object {
+                    $val = $Props.($_.Name)
+                    if ($val -eq $Url) {
+                        try { Remove-ItemProperty -Path $EdgeUrlPath -Name $_.Name -Force -ErrorAction SilentlyContinue } catch {}
+                    }
+                }
+            }
+        }
+    }
+    Write-Log -Message "Edge bypass URL blocklist removed." -Type "INFO" -Color Gray
+}
+
+function Apply-BypassHKLM {
+    $Policies = @(
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR"; Name = "AllowGameDVR"; Value = 0 },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR"; Name = "AllowOpenGameBar"; Value = 0 },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR"; Name = "AllowGameDVRRecording"; Value = 0 },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR"; Name = "AllowGameDVRCapture"; Value = 0 },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "AllowCortana"; Value = 0 },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "DisableWebSearch"; Value = 1 },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "ConnectedSearchUseWeb"; Value = 0 },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "ConnectedSearchUseWebOverMeteredConnections"; Value = 0 },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "ConnectedSearchSafeSearch"; Value = 1 },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "ConnectedSearchPrivacy"; Value = 1 },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppInstaller"; Name = "EnableAppInstaller"; Value = 0 },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppInstaller"; Name = "EnableWindowsPackageManager"; Value = 0 },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"; Name = "DefaultPopupsSetting"; Value = 2 },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"; Name = "RendererCodeIntegrityEnabled"; Value = 1 },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"; Name = "BrowserLegacyExtensionPointsBlocked"; Value = 1 },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"; Name = "AllowDeletingBrowserHistory"; Value = 0 },
+        @{ Path = "HKLM:\SYSTEM\CurrentControlSet\Services\LxssManager"; Name = "Start"; Value = 4 }
+    )
+    foreach ($Policy in $Policies) {
+        try {
+            if (-not (Test-Path $Policy.Path)) { New-Item -Path $Policy.Path -Force -ErrorAction SilentlyContinue | Out-Null }
+            Set-ItemProperty -Path $Policy.Path -Name $Policy.Name -Value $Policy.Value -Type DWord -Force -ErrorAction SilentlyContinue
+            Write-Log -Message "HKLM policy $($Policy.Name) = $($Policy.Value)" -Type "INFO" -Color Gray
+        } catch {
+            Write-Log -Message "Failed to set HKLM policy $($Policy.Name): $_" -Type "WARN" -Color Yellow
+        }
+    }
+    try {
+        Stop-Service -Name "LxssManager" -Force -ErrorAction SilentlyContinue
+        Write-Log -Message "WSL service stopped." -Type "INFO" -Color Gray
+    } catch {
+        Write-Log -Message "Could not stop WSL service: $_" -Type "WARN" -Color Yellow
+    }
+    Write-Log -Message "HKLM bypass policies applied." -Type "SUCCESS" -Color Green
+}
+
+function Remove-BypassHKLM {
+    $Removeable = @(
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR"; Name = "AllowGameDVR" },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR"; Name = "AllowOpenGameBar" },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR"; Name = "AllowGameDVRRecording" },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR"; Name = "AllowGameDVRCapture" },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "AllowCortana" },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "DisableWebSearch" },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "ConnectedSearchUseWeb" },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "ConnectedSearchUseWebOverMeteredConnections" },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "ConnectedSearchSafeSearch" },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name = "ConnectedSearchPrivacy" },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppInstaller"; Name = "EnableAppInstaller" },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppInstaller"; Name = "EnableWindowsPackageManager" },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"; Name = "DefaultPopupsSetting" },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"; Name = "RendererCodeIntegrityEnabled" },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"; Name = "BrowserLegacyExtensionPointsBlocked" },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"; Name = "AllowDeletingBrowserHistory" }
+    )
+    foreach ($Policy in $Removeable) {
+        if (Test-Path $Policy.Path) {
+            try { Remove-ItemProperty -Path $Policy.Path -Name $Policy.Name -Force -ErrorAction SilentlyContinue } catch {}
+        }
+    }
+    try {
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\LxssManager" -Name "Start" -Value 3 -Type DWord -Force -ErrorAction SilentlyContinue
+        Write-Log -Message "WSL service restored to Manual (Start=3)." -Type "INFO" -Color Gray
+    } catch {}
+    Write-Log -Message "HKLM bypass policies removed." -Type "INFO" -Color Gray
+}
+
+function Apply-SafeModeMitigation {
+    try {
+        & bcdedit /set "{current}" bootmenupolicy standard | Out-Null
+        Write-Log -Message "bcdedit: bootmenupolicy set to standard." -Type "INFO" -Color Gray
+    } catch { Write-Log -Message "bcdedit bootmenupolicy failed: $_" -Type "WARN" -Color Yellow }
+    try {
+        & bcdedit /set "{current}" recoveryenabled No | Out-Null
+        Write-Log -Message "bcdedit: recoveryenabled set to No." -Type "INFO" -Color Gray
+    } catch { Write-Log -Message "bcdedit recoveryenabled failed: $_" -Type "WARN" -Color Yellow }
+    try {
+        & reagentc /disable | Out-Null
+        Write-Log -Message "reagentc: Windows RE disabled." -Type "INFO" -Color Gray
+    } catch { Write-Log -Message "reagentc disable failed: $_" -Type "WARN" -Color Yellow }
+    Write-Log -Message "Safe Mode & Recovery mitigation applied." -Type "SUCCESS" -Color Green
+}
+
+function Remove-SafeModeMitigation {
+    try {
+        & bcdedit /set "{current}" recoveryenabled Yes | Out-Null
+        Write-Log -Message "bcdedit: recoveryenabled restored to Yes." -Type "INFO" -Color Gray
+    } catch {}
+    try {
+        & reagentc /enable | Out-Null
+        Write-Log -Message "reagentc: Windows RE enabled." -Type "INFO" -Color Gray
+    } catch {}
+    Write-Log -Message "Safe Mode & Recovery mitigation removed." -Type "INFO" -Color Gray
+}
+
+function Apply-ShadowCopyCleanup {
+    Write-Log -Message "Deleting all Volume Shadow Copies (bypass prevention)..." -Type "ACTION" -Color Magenta
+    try {
+        & vssadmin delete shadows /all /Quiet | Out-Null
+        Write-Log -Message "Shadow copies deleted." -Type "SUCCESS" -Color Green
+    } catch {
+        Write-Log -Message "Failed to delete shadow copies: $_" -Type "WARN" -Color Yellow
+    }
+}
+
+function Apply-FileAssociationBlock {
+    foreach ($item in $script:BlockedExtensions) {
+        $path = "HKLM:\SOFTWARE\Classes\$($item.Ext)"
+        if (Test-Path $path) {
+            try {
+                $current = (Get-ItemProperty -Path $path -Name "(Default)" -ErrorAction SilentlyContinue)."(Default)"
+                if ($current -and $current -ne "txtfile") {
+                    Set-ItemProperty -Path $path -Name "OSGuardOriginalProgID" -Value $current -Type String -Force -ErrorAction SilentlyContinue
+                }
+                Set-ItemProperty -Path $path -Name "(Default)" -Value "txtfile" -Type String -Force -ErrorAction Stop
+                Write-Log -Message "Blocked $($item.Ext) execution (assoc -> txtfile)." -Type "INFO" -Color Gray
+            } catch {
+                Write-Log -Message "Failed to block $($item.Ext): $_" -Type "WARN" -Color Yellow
+            }
+        }
+    }
+    Write-Log -Message "File association lockdown applied." -Type "SUCCESS" -Color Green
+}
+
+function Remove-FileAssociationBlock {
+    foreach ($item in $script:BlockedExtensions) {
+        $path = "HKLM:\SOFTWARE\Classes\$($item.Ext)"
+        if (Test-Path $path) {
+            try {
+                $original = (Get-ItemProperty -Path $path -Name "OSGuardOriginalProgID" -ErrorAction SilentlyContinue)."OSGuardOriginalProgID"
+                if ($original) {
+                    Set-ItemProperty -Path $path -Name "(Default)" -Value $original -Type String -Force -ErrorAction SilentlyContinue
+                    Remove-ItemProperty -Path $path -Name "OSGuardOriginalProgID" -Force -ErrorAction SilentlyContinue
+                } else {
+                    Set-ItemProperty -Path $path -Name "(Default)" -Value $item.Original -Type String -Force -ErrorAction SilentlyContinue
+                }
+                Write-Log -Message "Restored $($item.Ext) association." -Type "INFO" -Color Gray
+            } catch {}
+        }
+    }
+    Write-Log -Message "File association lockdown removed." -Type "INFO" -Color Gray
+}
+
+function Apply-BypassMitigations {
+    Write-Log -Message "Applying OS-Guard Bypass Mitigations..." -Type "ACTION" -Color Cyan
+    Apply-FolderExecutionDeny
+    Apply-IFEOBackdoorBlock
+    Apply-EdgeBypassBlocklist
+    Apply-BypassHKLM
+    Apply-SafeModeMitigation
+    Apply-ShadowCopyCleanup
+    Apply-FileAssociationBlock
+    Write-Log -Message "Bypass Mitigations applied." -Type "SUCCESS" -Color Green
+}
+
+function Remove-BypassMitigations {
+    Write-Log -Message "Removing OS-Guard Bypass Mitigations..." -Type "ACTION" -Color Cyan
+    Remove-FolderExecutionDeny
+    Remove-IFEOBackdoorBlock
+    Remove-EdgeBypassBlocklist
+    Remove-BypassHKLM
+    Remove-SafeModeMitigation
+    Remove-FileAssociationBlock
+    Write-Log -Message "Bypass Mitigations removed." -Type "SUCCESS" -Color Green
 }
 
 # ============================================================================
@@ -4707,6 +5130,8 @@ if ($WhatIf) { $script:WhatIfPreference = $true; Install-Persistence; return }
 if ($ExportReport) { Export-OSGuardReport; return }
 if ($FirstRun) { Show-SetupWizard; return }
 if ($LockNow)    { Exit-ParentMode; return }
+if ($BypassMitigation) { Apply-BypassMitigations; return }
+if ($RemoveBypassMitigation) { Remove-BypassMitigations; return }
 if ($Uninstall) {
     $CurrentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     $CurrentUserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
@@ -4773,9 +5198,11 @@ do {
     Write-Host "[16] FIRST RUN WIZARD" -ForegroundColor Green
     Write-Host "[17] EXPORT REPORT (CSV)" -ForegroundColor Green
     Write-Host "[18] HEALTH CHECK (DRIFT AUDIT)" -ForegroundColor Green
+    Write-Host "[19] APPLY BYPASS MITIGATIONS (Lockdown+)" -ForegroundColor Green
+    Write-Host "[20] REMOVE BYPASS MITIGATIONS" -ForegroundColor Yellow
     Write-Host "-----------------------------------------------------"
 
-    $Choice = Read-Host "Select an administrative action (1-18)"
+    $Choice = Read-Host "Select an administrative action (1-20)"
     $IntegrityStatus = Test-IntegrityStatus
 
     switch ($Choice) {
@@ -4902,6 +5329,24 @@ do {
         }
         "18" {
             Show-HealthCheck
+            Write-Host "`n[ PRESS ANY KEY TO RETURN TO MENU ]" -ForegroundColor DarkGray; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        }
+        "19" {
+            if ($IntegrityStatus -eq $false) {
+                Write-Host "`n[BLOCKED] Option [19] is disabled because the script has been tampered with." -ForegroundColor Red -BackgroundColor Black
+                Write-Host "Use option [4] to uninstall, then reinstall from a clean source." -ForegroundColor Yellow
+            } else {
+                Apply-BypassMitigations
+            }
+            Write-Host "`n[ PRESS ANY KEY TO RETURN TO MENU ]" -ForegroundColor DarkGray; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        }
+        "20" {
+            if ($IntegrityStatus -eq $false) {
+                Write-Host "`n[BLOCKED] Option [20] is disabled because the script has been tampered with." -ForegroundColor Red -BackgroundColor Black
+                Write-Host "Use option [4] to uninstall, then reinstall from a clean source." -ForegroundColor Yellow
+            } else {
+                Remove-BypassMitigations
+            }
             Write-Host "`n[ PRESS ANY KEY TO RETURN TO MENU ]" -ForegroundColor DarkGray; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
         }
         default { Write-Warning "Invalid Selection."; Start-Sleep -Seconds 1 }

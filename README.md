@@ -101,7 +101,18 @@ Built-in Administrator retains full privileges to install, modify, and unlock.
 || **Network-Level App Firewall** | `Invoke-OSGuardFirewall` uses `netsh advfirewall` to block outbound internet for child-installed programs and non-Edge browsers. |
 || **Wi-Fi SSID Geofencing** | `-HomeSSID "MyHomeWiFi"` auto-enables stricter lockdown (browser/game kill + firewall blocks) when the PC is not connected to the home network. |
 || **First Run Wizard** | `Show-SetupWizard` is a WinForms dialog that asks for child username, daily screen time limits, then auto-deploys. Removes the "read the menu" barrier. |
-|| **Program Guardian Engine** | Scheduled task `OSGuard-ProgramScanner` scans the child profile every 10 minutes for newly installed programs, hardens their directories and shortcuts so the child cannot tamper with them, and blocks 50+ Windows built-in exploit tools via `DisallowRun` registry policies (Notepad, WordPad, Paint, Write, Explorer, PowerShell, pwsh, CMD, WSH, mshta, certutil, bitsadmin, wmic, regsvr32, rundll32, msiexec, msconfig, mmc, eventvwr, UAC bypass tools, taskkill, ftp, curl, robocopy, takeown, icacls, net, schtasks, at, cleanmgr, sdclt, control, .cpl, .msc, and more). Also disables `NoOpenWith`, `NoInternetOpenWith`, `NoSecurityTab`, `NoHardwareTab`, and `NoManageMyComputerVerb`. |
+|| **Program Guardian Engine** | Scheduled task `OSGuard-ProgramScanner` scans the child profile every 10 minutes for newly installed programs, hardens their directories and shortcuts so the child cannot tamper with them, and blocks 50+ Windows built-in exploit tools via `DisallowRun` registry policies (Notepad, WordPad, Paint, Write, Explorer, PowerShell, pwsh, CMD, WSH, SmartScreen, Fast User Switching). |
+|| **Bypass Mitigation Layer** | `Apply-BypassMitigations` blocks 146+ `DisallowRun` entries (PowerShell ISE, Windows Terminal, VS Code, Python, Node, Java, .NET, Docker, winget, Steam, Epic, Origin, Uplay, Battle.net, Discord, Telegram, AnyDesk, TeamViewer, RDP, VirtualBox, VMware, QEMU, PuTTY, WinSCP, FileZilla, VPN clients, OpenSSH, WSL, bash, Hyper-V, UAC bypass binaries, Terminal Server tools, Snipping Tool, Cortana, Search, Game Bar, Xbox apps, collaboration apps, cloud gaming, remote desktop). Also blocks cloud gaming/remote shell/IDE URLs in Edge (`URLBlocklist`), disables IFEO backdoors (sethc, utilman, osk, magnify, narrator), denies ExecuteFile ACL on child Desktop/Downloads/Temp/WindowsApps, remaps `.scr`/`.com`/`.pif` to `txtfile`, disables WSL service, disables Safe Mode recovery (`bcdedit`/`reagentc`), and deletes volume shadow copies. |
+|| **Edge URL Blocklist** | 40+ cloud gaming, remote shell, and IDE URLs are blocked in Edge (`xbox.com/play`, `play.geforcenow.com`, `shell.cloud.google.com`, `github.com/codespaces`, `replit.com`, `vscode.dev`, `anydesk.com`, `teamviewer.com`, `discord.com`, `web.telegram.org`, and more). |
+|| **IFEO Backdoor Block** | Sets `Debugger` to `systray.exe` for `sethc.exe`, `utilman.exe`, `osk.exe`, `magnify.exe`, `narrator.exe`, and `DisplaySwitch.exe` to prevent accessibility backdoor exploits. |
+|| **Folder Execution Deny** | Denies `ExecuteFile` ACL on the child's Desktop, Documents, Downloads, Music, Pictures, Videos, `AppData\Local\Temp`, and `AppData\Local\Microsoft\WindowsApps` to prevent running downloaded/portable executables. |
+|| **File Association Lockdown** | Remaps `.scr`, `.com`, and `.pif` file associations to `txtfile` so they cannot execute as programs. Original associations are backed up and restored on removal. |
+|| **Safe Mode Mitigation** | `bcdedit` sets `bootmenupolicy standard`, disables `recoveryenabled`, and `reagentc /disable` disables Windows Recovery Environment to prevent Safe Mode bypass. |
+|| **Shadow Copy Cleanup** | `vssadmin delete shadows /all` removes all volume shadow copies to prevent restoration of unhardened system states. |
+|| **WSL Disablement** | Sets `LxssManager` service `Start = 4` (Disabled) and stops the service to prevent Linux subsystem bypass. |
+|| **Game DVR / Game Bar Block** | `HKLM` policies disable `AllowGameDVR`, `AllowOpenGameBar`, `AllowGameDVRRecording`, and `AllowGameDVRCapture` to prevent Xbox/Game Bar bypass. |
+|| **Cortana / Web Search Block** | `AllowCortana = 0`, `DisableWebSearch = 1`, and `ConnectedSearchUseWeb = 0` prevent search-based bypass and web results from the Start Menu. |
+|| **AppInstaller / winget Block** | `EnableAppInstaller = 0` and `EnableWindowsPackageManager = 0` prevent package-manager-based software installation. |
 
 |---
 
@@ -117,8 +128,15 @@ flowchart TB
     subgraph Layer2["Layer 2: OS Child Lockdown"]
         B1[UAC Max / Store Remove]
         B2[HKCU Policies via NTUSER.DAT]
-        B3[50+ DisallowRun Exploit Blocks]
+        B3[146+ DisallowRun Exploit Blocks]
         B4[Edge-Only Browser Lockdown]
+        B5[Edge URL Blocklist]
+        B6[IFEO Backdoor Block]
+        B7[Folder Execution Deny]
+        B8[File Association Lockdown]
+        B9[Safe Mode Mitigation]
+        B10[Shadow Copy Cleanup]
+        B11[WSL Disablement]
     end
     subgraph Layer3["Layer 3: Persistence & Self-Healing"]
         C1[Scheduled Tasks: Boot + Logon + Network]
@@ -321,7 +339,7 @@ The script is organized into modular functions rather than a linear execution fl
 - **Parent Mode Functions** — `Test-ParentPassword`, `Set-ParentPassword`, `Enter-ParentMode`, `Exit-ParentMode`, `Start-ParentModeWatch`, `Stop-ParentModeWatch`, `Add-ParentModeAdminTools`, `Remove-ParentModeAdminTools`, `Install-ParentModeAFK`, `Remove-ParentModeAFK`
 - **Persistence Functions** — `Install-Persistence`, `Uninstall-Persistence`, `Install-GuardianTasks`, `Remove-GuardianTasks`, `Install-ChildLogonTask`, `Remove-ChildLogonTask`, `Install-WmiSubscription`, `Remove-WmiSubscription`, `Install-ProgramScanner`, `Remove-ProgramScanner`
 - **Interactive UI** — `Show-Menu`, `Show-Status`, `Show-CategoryGrid`, `Show-ChildPanel`
-- **CLI Dispatcher** — The `param` block handles `-Install`, `-Uninstall`, `-Lock`, `-Unlock`, `-SilentLock`, `-ChildLock`, `-ChildUser`, `-ParentMode`, `-SetParentPassword`, `-ChildGameRequest`, `-ContinueParentMode`, `-LockNow`, `-ProgramScan`, `-SetScreenTime`, `-ScreenTimeStatus`, `-GrantBrowserTime`, `-ScreenTimeEnforce`
+- **CLI Dispatcher** — The `param` block handles `-Install`, `-Uninstall`, `-Lock`, `-Unlock`, `-SilentLock`, `-ChildLock`, `-ChildUser`, `-ParentMode`, `-SetParentPassword`, `-ChildGameRequest`, `-ContinueParentMode`, `-LockNow`, `-ProgramScan`, `-SetScreenTime`, `-ScreenTimeStatus`, `-GrantBrowserTime`, `-ScreenTimeEnforce`, `-BypassMitigation`, `-RemoveBypassMitigation`
 
 ### File & Registry Footprint
 
@@ -346,7 +364,7 @@ The script is organized into modular functions rather than a linear execution fl
 - `HKLM\SOFTWARE\Policies\Microsoft\Edge\` — Edge deep lockdown policies
 - `HKLM\SOFTWARE\Policies\Microsoft\Windows\` — Various OS policy branches
 - `HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{GUID}` — DNS ACL locks
-- `HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun` — 50+ exploit tool blocks (in child hive)
+- `HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun` — 146+ exploit tool blocks (in child hive)
 - `HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\DisallowRun` entries 51–58 — Browser blocks (in child hive)
 
 ### Who Should Use This Script
@@ -359,7 +377,7 @@ The script is organized into modular functions rather than a linear execution fl
 
 ### What This Script Is NOT
 
-- It is **not** a kernel-level security boundary. A determined attacker with physical access, a live USB, or Safe Mode can bypass it.
+- It is **not** a kernel-level security boundary. A determined attacker with physical access or a live USB can still bypass it. Safe Mode bypass is partially mitigated by `-BypassMitigation` (disables recovery and standard boot menu), but a live USB or bootable ISO bypasses everything.
 - It is **not** a replacement for enterprise MDM or Active Directory Group Policy. It is a local-only enforcement layer.
 - It is **not** anti-malware. It does not scan for viruses or ransomware. It restricts the operating system surface area to reduce the child's ability to cause harm or bypass network protections.
 - It does **not** block the internet. It locks DNS to trusted servers and blocks alternative browsers, but the child can still browse the web through Edge within the configured screen time limits.
@@ -433,6 +451,8 @@ After installation, the global `oslock` command is available from any terminal:
 || `-BrandingOrg <name>` | Set white-label branding (default: `OS-Guard`) | Admin |
 || `-HomeSSID <name>` | Set home Wi-Fi SSID for geofencing | Admin |
 || `-ChildUsers <array>` | Multi-child support: apply to multiple usernames | Admin |
+|| `-BypassMitigation` | Apply bypass mitigation layer (IFEO, ACLs, URLs, Safe Mode, Shadow Copy) | Admin |
+|| `-RemoveBypassMitigation` | Remove bypass mitigation layer | Admin |
 
 **Uninstall from a SYSTEM shell:**
 
@@ -480,12 +500,14 @@ Running the script without flags opens the live menu:
 |[6] EXIT TERMINAL
 |[7] ENTER PARENT MODE (Unlock with password)
 |[8] LOCK NOW (Re-lock immediately)
+|[9] BYPASS MITIGATION (Apply advanced anti-bypass layer)
+|[10] REMOVE BYPASS MITIGATION (Remove anti-bypass layer)
 |-----------------------------------------------------|
-Select an administrative action (1-8):
+Select an administrative action (1-10):
 ```
 
 - Option `[3]` is hidden when already installed.
-- Options `[1]`, `[2]`, `[3]`, `[7]`, and `[8]` are blocked with a red warning if tampering is detected.
+- Options `[1]`, `[2]`, `[3]`, `[7]`, `[8]`, `[9]`, and `[10]` are blocked with a red warning if tampering is detected.
 - **OS + DNS menu** (`new2_OS_lockdown.ps1`) also shows the **OS Child Lockdown** panel (UAC, Store, TaskMgr, Regedit status) and checks the `Child` account state.
 - **Program Guardian** is shown in the menu as a green `[X]` when the `OSGuard-ProgramScanner` task is registered.
 
@@ -566,7 +588,7 @@ If the installed script is modified without updating the integrity hash, the men
 
   >>> TAMPER DETECTED! ACTION REQUIRED <<<
   - Run a full antivirus scan immediately.
-  - Do NOT use options [1] or [2] (they may run malicious code).
+  - Do NOT use options [1], [2], [9], or [10] (they may run malicious code).
   - Use option [4] to uninstall, then reinstall from a clean source.
   - Check Task Scheduler for unknown tasks and remove them.
 ```
@@ -590,7 +612,7 @@ Get-ScheduledTask | Where-Object {$_.TaskPath -eq '\' -and $_.Author -notmatch '
 - **Captive portals** (hotels, airports) may fail if you use static DNS. Unlock temporarily with option `[2]`, log in, then re-lock with `[1]`.
 - **Corporate VPNs** (Cisco, Fortinet) that rewrite adapter DNS may conflict with the lock. WFP-based VPNs (Proton) are unaffected.
 - **Admin attacker with `takeown` / `psexec -s`** can still bypass the script. This is a Windows discretionary ACL limitation, not a script flaw. The script raises the effort required but does not create a kernel-level security boundary.
-- **Offline boot** (live USB, Safe Mode) bypasses all protections.
+- **Offline boot** (live USB, Safe Mode) bypasses all protections unless `-BypassMitigation` is applied (Safe Mode mitigation disables recovery and standard boot menu, but a live USB still bypasses everything).
 - **Child account must log in once** before offline NTUSER.DAT hive policies can be applied. If the child has never logged in, the `ChildLogon` scheduled task will apply HKCU policies at the first logon.
 - **Windows 10/11 Home** may not have `Get-LocalUser` / `New-LocalUser` cmdlets available in older builds; the script falls back to `net user` where possible.
 - **Program Guardian** only discovers programs already installed in the child profile at scan time; it does not prevent the child from running portable executables stored outside scanned directories. Admins should install software into the child Desktop, Start Menu, or `AppData\Local\Programs` so the engine can find and harden it.
@@ -668,7 +690,8 @@ This section tracks upcoming and recently merged changes before they are tagged 
 |- **Uninstall SYSTEM Cleanup Fix** (2026-06-30): Fixed `Uninstall-Persistence` incorrectly reporting `SYSTEM cleanup failed` because `Invoke-AsSystem` called `Write-Log` after the SYSTEM task deleted the directory, and `Write-Log` auto-creates it. Changed `Invoke-AsSystem` to use `Write-Host` for its internal debug messages, and added a fallback direct `Remove-Item` after the SYSTEM task returns so ACLs reset by the task can be used for a final cleanup attempt.
 |- **Write-Log Directory Recreate Fix** (2026-07-01): Fixed the root cause of the uninstaller falsely reporting `Install directory still exists`. `Write-Log` was auto-creating `$InstallDir` whenever it was missing, which meant that after `Uninstall-Persistence` deleted the directory, any subsequent `Write-Log` call silently recreated it. Added a `$script:SuppressLogDirCreation` flag that is set to `$true` at the start of `Uninstall-Persistence` and reset to `$false` after the final verification, preventing `Write-Log` from recreating the directory during uninstall. Also hardened `Write-Log` to only write to the log file if the directory actually exists.
 |- **Memorable Password Generation** (2026-07-01): Replaced the random 12-character alphanumeric default password with a human-memorable passphrase generator (`New-MemorablePassword`). Passwords now use a common English word + 2-digit number + an easy symbol from a reduced keyboard-safe set (`! # $ % & + - = ? _ @`), assembled in a random order pattern (e.g., `Dragon42!`, `!42Dragon`, `42!Dragon`). `Set-ParentPassword` displays three live suggestions before prompting. Minimum length reduced from 8 to 6 characters with relaxed complexity rules (`Test-PasswordComplexity`: requires at least one letter and one number). The default install password, tamper lockout screen, and window guard all use the new memorable format.
-|- **Menu Option [4] Conditional Visibility** (2026-07-01): The `[4] UNINSTALL SERVICE` menu option is now hidden when the script is not installed (i.e., `$InstallScript` does not exist), and only appears when the service is detected. This mirrors the existing behavior of option `[3] INSTALL SERVICE`, which is hidden when already installed.
+||- **Menu Option [4] Conditional Visibility** (2026-07-01): The `[4] UNINSTALL SERVICE` menu option is now hidden when the script is not installed (i.e., `$InstallScript` does not exist), and only appears when the service is detected. This mirrors the existing behavior of option `[3] INSTALL SERVICE`, which is hidden when already installed.
+||- **Bypass Mitigation Layer** (2026-07-01): Added `-BypassMitigation` and `-RemoveBypassMitigation` flags plus interactive menu options `[9]` and `[10]`. The layer includes 146+ `DisallowRun` entries (IDEs, terminals, remote tools, VPNs, game launchers, cloud gaming, UAC bypass binaries), Edge URL blocklist (40+ cloud gaming/remote shell/IDE URLs), IFEO backdoor block (`sethc`, `utilman`, `osk`, `magnify`, `narrator`, `DisplaySwitch`), folder execution deny ACLs on child Desktop/Downloads/Temp/WindowsApps, file association lockdown (`.scr`/`.com`/`.pif` remapped to `txtfile`), Safe Mode mitigation (`bcdedit` bootmenupolicy standard + recovery disabled + `reagentc /disable`), volume shadow copy cleanup (`vssadmin delete shadows /all`), WSL service disable (`LxssManager Start=4`), Game DVR/Game Bar block, Cortana/web search block, AppInstaller/winget block, and `DisableSearchBoxSuggestions` in the child hive.
 
 ---
 
