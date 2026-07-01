@@ -4758,7 +4758,9 @@ do {
     if (-not (Test-Path $InstallScript)) {
         Write-Host "[3] INSTALL SERVICE (Auto-Heal & Create 'oslock' command)" -ForegroundColor Green
     }
-    Write-Host "[4] UNINSTALL SERVICE (Remove background tasks & Unlock)" -ForegroundColor Red
+    if (Test-Path $InstallScript) {
+        Write-Host "[4] UNINSTALL SERVICE (Remove background tasks & Unlock)" -ForegroundColor Red
+    }
     Write-Host "[5] REFRESH SYSTEM STATUS" -ForegroundColor Gray
     Write-Host "[6] EXIT TERMINAL" -ForegroundColor Gray
     Write-Host "[7] ENTER PARENT MODE (Unlock with password)" -ForegroundColor Green
